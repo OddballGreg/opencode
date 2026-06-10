@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { table, text, json, integer, double, index, uniqueIndex, primaryKey } from "../database/schema-dialect"
 import * as DatabasePath from "../database/path"
 import { ProjectTable } from "../project/sql"
 import type { SessionMessage } from "./message"
@@ -19,7 +19,7 @@ type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
 type V1PartData = Omit<SessionV1.Part, "id" | "sessionID" | "messageID">
 
-export const SessionTable = sqliteTable(
+export const SessionTable = table(
   "session",
   {
     id: text().$type<SessionSchema.ID>().primaryKey(),
@@ -38,18 +38,18 @@ export const SessionTable = sqliteTable(
     summary_additions: integer(),
     summary_deletions: integer(),
     summary_files: integer(),
-    summary_diffs: text({ mode: "json" }).$type<Snapshot.LegacyFileDiff[]>(),
-    metadata: text({ mode: "json" }).$type<Record<string, unknown>>(),
-    cost: real().notNull().default(0),
+    summary_diffs: json().$type<Snapshot.LegacyFileDiff[]>(),
+    metadata: json().$type<Record<string, unknown>>(),
+    cost: double().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),
     tokens_reasoning: integer().notNull().default(0),
     tokens_cache_read: integer().notNull().default(0),
     tokens_cache_write: integer().notNull().default(0),
-    revert: text({ mode: "json" }).$type<Revert.State>(),
-    permission: text({ mode: "json" }).$type<PermissionV1.Ruleset>(),
+    revert: json().$type<Revert.State>(),
+    permission: json().$type<PermissionV1.Ruleset>(),
     agent: text(),
-    model: text({ mode: "json" }).$type<{
+    model: json().$type<{
       id: string
       providerID: string
       variant?: string
@@ -65,7 +65,7 @@ export const SessionTable = sqliteTable(
   ],
 )
 
-export const MessageTable = sqliteTable(
+export const MessageTable = table(
   "message",
   {
     id: text().$type<MessageID>().primaryKey(),
@@ -74,12 +74,12 @@ export const MessageTable = sqliteTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<V1MessageData>(),
+    data: json().notNull().$type<V1MessageData>(),
   },
   (table) => [index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id)],
 )
 
-export const PartTable = sqliteTable(
+export const PartTable = table(
   "part",
   {
     id: text().$type<PartID>().primaryKey(),
@@ -89,7 +89,7 @@ export const PartTable = sqliteTable(
       .references(() => MessageTable.id, { onDelete: "cascade" }),
     session_id: text().$type<SessionSchema.ID>().notNull(),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<V1PartData>(),
+    data: json().notNull().$type<V1PartData>(),
   },
   (table) => [
     index("part_message_id_id_idx").on(table.message_id, table.id),
@@ -97,7 +97,7 @@ export const PartTable = sqliteTable(
   ],
 )
 
-export const TodoTable = sqliteTable(
+export const TodoTable = table(
   "todo",
   {
     session_id: text()
@@ -116,7 +116,7 @@ export const TodoTable = sqliteTable(
   ],
 )
 
-export const SessionMessageTable = sqliteTable(
+export const SessionMessageTable = table(
   "session_message",
   {
     id: text().$type<SessionMessage.ID>().primaryKey(),
@@ -127,7 +127,7 @@ export const SessionMessageTable = sqliteTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: integer().notNull(),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
+    data: json().notNull().$type<SessionMessageData>(),
   },
   (table) => [
     uniqueIndex("session_message_session_seq_idx").on(table.session_id, table.seq),
@@ -137,7 +137,7 @@ export const SessionMessageTable = sqliteTable(
   ],
 )
 
-export const SessionInputTable = sqliteTable(
+export const SessionInputTable = table(
   "session_input",
   {
     id: text().$type<SessionMessage.ID>().primaryKey(),
@@ -145,7 +145,7 @@ export const SessionInputTable = sqliteTable(
       .$type<SessionSchema.ID>()
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
-    prompt: text({ mode: "json" }).notNull().$type<Prompt>(),
+    prompt: json().notNull().$type<Prompt>(),
     delivery: text().$type<SessionInput.Delivery>().notNull(),
     admitted_seq: integer().notNull(),
     promoted_seq: integer(),
@@ -165,12 +165,12 @@ export const SessionInputTable = sqliteTable(
   ],
 )
 
-export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
+export const SessionContextEpochTable = table("session_context_epoch", {
   session_id: text()
     .$type<SessionSchema.ID>()
     .primaryKey()
     .references(() => SessionTable.id, { onDelete: "cascade" }),
   baseline: text().notNull(),
-  snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
+  snapshot: json().notNull().$type<SystemContext.Snapshot>(),
   baseline_seq: integer().notNull(),
 })
