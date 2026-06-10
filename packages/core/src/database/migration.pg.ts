@@ -20,25 +20,49 @@ export function apply(db: Database) {
   return lock.withPermit(applyOnly(db, pgMigrations))
 }
 
+// Arbitrary but stable key for the migration advisory lock.
+const MIGRATION_LOCK_KEY = 4314177615n
+
 export function applyOnly(db: Database, input: { id: string; sql: string }[]) {
   return Effect.gen(function* () {
-    yield* db.run(
-      sql`CREATE TABLE IF NOT EXISTS ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed BIGINT NOT NULL)`,
-    )
-    const completed = new Set(
-      (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map(
-        (row: { id: string }) => row.id,
-      ),
-    )
+    // Fast path (steady state): if the migration table exists and every
+    // migration is already recorded, do nothing. This avoids taking the
+    // heavyweight advisory-lock transaction (which holds a reserved connection)
+    // on every boot. Without this, many simultaneous cold boots pile up on the
+    // lock and exhaust the connection pool ("Failed to reserve connection").
+    const hasTable =
+      (yield* db.all<{ reg: string | null }>(sql`SELECT to_regclass('migration') AS reg`))[0]?.reg != null
+    if (hasTable) {
+      const completed = new Set(
+        (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map(
+          (row: { id: string }) => row.id,
+        ),
+      )
+      if (input.every((migration) => completed.has(migration.id))) return
+    }
 
-    for (const migration of input) {
-      if (completed.has(migration.id)) continue
-      const statements = migration.sql
-        .split("--> statement-breakpoint")
-        .map((statement) => statement.trim())
-        .filter((statement) => statement.length > 0)
-      yield* db.transaction((tx: Transaction) =>
-        Effect.gen(function* () {
+    // Slow path (first boot / pending migrations): serialize across processes
+    // with a transaction-scoped advisory lock. Unlike SQLite (single writer),
+    // multiple opencode processes can boot against the same Postgres at once and
+    // would otherwise race on `CREATE TABLE IF NOT EXISTS` and the inserts.
+    yield* db.transaction((tx: Transaction) =>
+      Effect.gen(function* () {
+        yield* tx.run(sql`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK_KEY})`)
+        yield* tx.run(
+          sql`CREATE TABLE IF NOT EXISTS ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed BIGINT NOT NULL)`,
+        )
+        const completed = new Set(
+          (yield* tx.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map(
+            (row: { id: string }) => row.id,
+          ),
+        )
+
+        for (const migration of input) {
+          if (completed.has(migration.id)) continue
+          const statements = migration.sql
+            .split("--> statement-breakpoint")
+            .map((statement) => statement.trim())
+            .filter((statement) => statement.length > 0)
           if (!process.env.OPENCODE_SKIP_MIGRATIONS) {
             for (const statement of statements) {
               yield* tx.run(sql.raw(statement))
@@ -47,8 +71,8 @@ export function applyOnly(db: Database, input: { id: string; sql: string }[]) {
           yield* tx.run(
             sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
           )
-        }),
-      )
-    }
+        }
+      }),
+    )
   })
 }
