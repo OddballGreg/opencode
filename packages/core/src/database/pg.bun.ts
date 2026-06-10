@@ -25,6 +25,7 @@ interface PgClient extends Client.SqlClient {
 
 interface Config {
   readonly url: string
+  readonly maxConnections?: number
   readonly spanAttributes?: Record<string, unknown>
   readonly transformResultNames?: (str: string) => string
   readonly transformQueryNames?: (str: string) => string
@@ -147,7 +148,17 @@ const nativeLayer = (config: Config) =>
   Layer.effect(
     Pg.Native,
     Effect.gen(function* () {
-      const native = new SQL(config.url)
+      // Cap the per-process pool. opencode runs many concurrent processes
+      // against one Postgres; an unbounded/large pool per process can exhaust
+      // server max_connections during a simultaneous-startup burst (surfaces as
+      // a bare "Failed query" / "too many clients"). A small pool is plenty
+      // since each session is effectively single-writer.
+      const native = new SQL({
+        url: config.url,
+        max: config.maxConnections ?? 4,
+        idleTimeout: 20,
+        connectionTimeout: 30,
+      })
       yield* Effect.addFinalizer(() => Effect.promise(() => native.close()))
       return native
     }),
