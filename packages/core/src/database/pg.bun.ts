@@ -148,14 +148,18 @@ const nativeLayer = (config: Config) =>
   Layer.effect(
     Pg.Native,
     Effect.gen(function* () {
-      // Cap the per-process pool. opencode runs many concurrent processes
-      // against one Postgres; an unbounded/large pool per process can exhaust
-      // server max_connections during a simultaneous-startup burst (surfaces as
-      // a bare "Failed query" / "too many clients"). A small pool is plenty
-      // since each session is effectively single-writer.
+      // Per-process pool size. Two competing constraints:
+      //  - A single active session issues many concurrent DB ops during a turn
+      //    (streaming parts + event-sourced writes + projector reads + a
+      //    reserved transaction connection). Too small a pool starves it and
+      //    breaks the instance mid-turn with "Failed to reserve connection".
+      //  - opencode runs many processes against one Postgres, so the pool must
+      //    not be so large that N processes exhaust server max_connections.
+      // We use a moderate pool (8) and rely on a raised server max_connections
+      // (500 on the dedicated local instance) for headroom (~60 processes).
       const native = new SQL({
         url: config.url,
-        max: config.maxConnections ?? 4,
+        max: config.maxConnections ?? Number(process.env.OPENCODE_DB_POOL_MAX ?? 8),
         idleTimeout: 20,
         connectionTimeout: 30,
       })
