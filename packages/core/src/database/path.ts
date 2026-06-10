@@ -1,5 +1,5 @@
 import nodePath from "path"
-import { customType } from "drizzle-orm/sqlite-core"
+import { customColumn } from "./schema-dialect"
 import { AbsolutePath } from "../schema"
 
 function storagePath(input: string) {
@@ -24,7 +24,7 @@ function toPlatform(input: string) {
   return input.replaceAll("/", "\\")
 }
 
-export const absoluteColumn = customType<{
+export const absoluteColumn = customColumn<{
   data: AbsolutePath
   driverData: string
   driverOutput: string
@@ -42,7 +42,7 @@ export const absoluteColumn = customType<{
 
 // Legacy sessions may persist an empty directory. Keep that existing value
 // readable while normalizing and validating every real directory.
-export const directoryColumn = customType<{
+export const directoryColumn = customColumn<{
   data: string
   driverData: string
   driverOutput: string
@@ -58,7 +58,7 @@ export const directoryColumn = customType<{
   },
 })
 
-export const pathColumn = customType<{
+export const pathColumn = customColumn<{
   data: string
   driverData: string
   driverOutput: string
@@ -74,7 +74,7 @@ export const pathColumn = customType<{
   },
 })
 
-export const absoluteArrayColumn = customType<{
+export const absoluteArrayColumn = customColumn<{
   data: AbsolutePath[]
   driverData: string
   driverOutput: string
