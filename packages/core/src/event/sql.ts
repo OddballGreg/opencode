@@ -1,13 +1,13 @@
-import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { table, text, json, integer, index, uniqueIndex, primaryKey } from "../database/schema-dialect"
 import type { EventV2 } from "../event"
 
-export const EventSequenceTable = sqliteTable("event_sequence", {
+export const EventSequenceTable = table("event_sequence", {
   aggregate_id: text().notNull().primaryKey(),
   seq: integer().notNull(),
   owner_id: text(),
 })
 
-export const EventTable = sqliteTable(
+export const EventTable = table(
   "event",
   {
     id: text().$type<EventV2.ID>().primaryKey(),
@@ -16,7 +16,7 @@ export const EventTable = sqliteTable(
       .references(() => EventSequenceTable.aggregate_id, { onDelete: "cascade" }),
     seq: integer().notNull(),
     type: text().notNull(),
-    data: text({ mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    data: json().$type<Record<string, unknown>>().notNull(),
   },
   (table) => [
     uniqueIndex("event_aggregate_seq_idx").on(table.aggregate_id, table.seq),
