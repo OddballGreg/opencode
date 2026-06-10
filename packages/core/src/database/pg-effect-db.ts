@@ -32,6 +32,7 @@ import { PgDialect } from "drizzle-orm/pg-core"
 import { PgEffectDatabase } from "drizzle-orm/pg-core/effect"
 import { EffectPgSession } from "drizzle-orm/effect-postgres/session"
 import { effectPgCodecs } from "drizzle-orm/effect-postgres/codecs"
+import { refineCodecs } from "drizzle-orm/codecs"
 import { EffectCache } from "drizzle-orm/cache/core/cache-effect"
 import { EffectLogger } from "drizzle-orm/effect-core"
 // Type-only: the stock concrete db type, used purely to mirror its method
@@ -39,6 +40,46 @@ import { EffectLogger } from "drizzle-orm/effect-core"
 import type { EffectPgDatabase } from "drizzle-orm/effect-postgres"
 
 type RawQuery = SQL | SQLWrapper | string
+
+/**
+ * json/jsonb codec overrides for the Bun.SQL driver.
+ *
+ * drizzle's stock `effectPgCodecs` are tuned for the `@effect/sql-pg` /
+ * node-postgres driver: their `json`/`jsonb` `normalizeParam` is
+ * `(v) => JSON.stringify(v)`, because that driver passes the resulting text
+ * straight to Postgres, which then parses it into the column's json type.
+ *
+ * Bun.SQL (`pg.bun.ts`) does NOT behave that way:
+ *  - A JS **object** bound to a jsonb param is serialized by Bun into a proper
+ *    JSON object (`jsonb_typeof = object`).
+ *  - A **string** bound to a jsonb param is stored as a JSON *string* literal
+ *    (`jsonb_typeof = string`) — i.e. double-encoded.
+ *
+ * So leaving drizzle's `JSON.stringify` in place makes every query-builder
+ * insert/update store jsonb as a double-encoded string. On read, Bun then hands
+ * that string back unchanged (jsonb has no read codec by default), so
+ * `row.model` is a `string` instead of an object and `Session.fromRow` throws
+ * `Expected string, got undefined` (it reads `row.model.id`).
+ *
+ * Fixes, applied to both `json` and `jsonb`:
+ *  - `normalizeParam` -> identity: hand the JS object to Bun, which serializes
+ *    it correctly. (write side / root cause)
+ *  - `normalize` -> parse-if-string: if a value still arrives as a JSON string
+ *    (e.g. rows written before this fix, or imported via the raw migration
+ *    path), `JSON.parse` it back to an object. (read side / defensive)
+ *
+ * These overrides only feed the Postgres dialect built below; the SQLite path
+ * uses `drizzle-orm/sqlite-core` and its own codecs, so it is unaffected.
+ */
+const parseJsonIfString = (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value)
+const identityParam = (value: unknown) => value
+// Refine the full `effectPgCodecs` (NOT the bare `genericPgCodecs`) so all the
+// other normalizers it adds — notably `bigint`/`int8` -> Number, which makes
+// `bigint({ mode: "number" })` columns read back as JS numbers — are preserved.
+const pgCodecs = refineCodecs(effectPgCodecs as any, {
+  json: { normalize: parseJsonIfString, normalizeParam: identityParam },
+  jsonb: { normalize: parseJsonIfString, normalizeParam: identityParam },
+} as any)
 
 /**
  * Construct a Postgres Effect-Drizzle database from opencode's own effect
@@ -53,7 +94,7 @@ export const makeDatabase = Effect.gen(function* () {
   const client = yield* SqlClient.SqlClient
   const cache = yield* EffectCache.make
   const logger = yield* EffectLogger.make
-  const dialect = new PgDialect({ codecs: effectPgCodecs } as any)
+  const dialect = new PgDialect({ codecs: pgCodecs } as any)
   const relations = {} as any
   const session = new EffectPgSession(client as any, dialect, relations, { logger, cache } as any)
   const db = new PgEffectDatabase(dialect, session as any, relations) as unknown as EffectPgDatabase
