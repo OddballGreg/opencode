@@ -69,7 +69,8 @@ CREATE TABLE "permission" (
 CREATE TABLE "project_directory" (
 	"project_id" text,
 	"directory" text,
-	"type" text NOT NULL,
+	"type" text,
+	"strategy" text,
 	"time_created" bigint NOT NULL,
 	CONSTRAINT "project_directory_pkey" PRIMARY KEY("project_id","directory")
 );
@@ -109,11 +110,8 @@ CREATE TABLE "part" (
 CREATE TABLE "session_context_epoch" (
 	"session_id" text PRIMARY KEY,
 	"baseline" text NOT NULL,
-	"agent" text DEFAULT 'build' NOT NULL,
 	"snapshot" jsonb NOT NULL,
-	"baseline_seq" bigint NOT NULL,
-	"replacement_seq" bigint,
-	"revision" bigint DEFAULT 0 NOT NULL
+	"baseline_seq" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "session_input" (
