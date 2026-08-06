@@ -29,7 +29,7 @@ const program = Effect.gen(function* () {
   console.log("\nfromRow() succeeded")
 })
 
-const layer = Database.layerFromUrl(url).pipe(Layer.provide(Global.defaultLayer))
+const layer = Database.layerFromUrl(url).pipe(Layer.provide(Global.layerWith({})))
 Effect.runPromise(program.pipe(Effect.provide(layer))).then(
   () => { console.log("\nALL CHECKS PASSED"); process.exit(0) },
   (err) => { console.error("\nFAILED:", err); process.exit(1) },
