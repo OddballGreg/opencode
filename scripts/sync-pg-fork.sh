@@ -32,12 +32,19 @@ PATCH_BASE_TAG_HINT="v1.17.1"   # the tag the pg patch set was first cut on
 PG_BRANCH_PREFIX="feat/postgres-backend-v"
 
 UPSTREAM_REF="origin/dev"
+# The branch that actually holds the CURRENT, COMPLETE pg patch set (core pg
+# commits + sync tooling + reverse migrator). This is NOT the stale
+# `fork/feat/postgres-backend` remote branch (which only has the original 7
+# core commits on a v1.17.1 base and is missing drizzle.pg.config.ts, so a
+# rebase off it would fail at the regenerate step). Override with --patch-source.
+PATCH_SOURCE="${OPENCODE_PG_PATCH_SOURCE:-feat/pg-to-sqlite-migrator}"
 DO_SOAK=1
 FAST_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upstream) UPSTREAM_REF="$2"; shift 2 ;;
+    --patch-source) PATCH_SOURCE="$2"; shift 2 ;;
     --no-soak)  DO_SOAK=0; shift ;;
     --fast)     FAST_BUILD=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -69,12 +76,13 @@ NEW_BRANCH="${PG_BRANCH_PREFIX}${UP_VER}"
 log "Upstream ${UPSTREAM_REF} is v${UP_VER}; target branch ${NEW_BRANCH}"
 
 # ---- 2. rebase / reapply pg patch set -------------------------------------
-# The pg patch set is the run of commits on fork/feat/postgres-backend since its
+# The pg patch set is the run of commits on ${PATCH_SOURCE} since its
 # merge-base with upstream. We rebase them onto the new upstream ref on a fresh
 # branch so the diff stays reviewable.
-log "Creating ${NEW_BRANCH} from fork/feat/postgres-backend and rebasing onto ${UPSTREAM_REF}"
+log "Creating ${NEW_BRANCH} from ${PATCH_SOURCE} and rebasing onto ${UPSTREAM_REF}"
+git rev-parse --verify "$PATCH_SOURCE" >/dev/null 2>&1 || { echo "patch source ref not found: $PATCH_SOURCE (override with --patch-source)" >&2; exit 1; }
 git branch -D "$NEW_BRANCH" 2>/dev/null || true
-git checkout -b "$NEW_BRANCH" fork/feat/postgres-backend
+git checkout -b "$NEW_BRANCH" "$PATCH_SOURCE"
 if ! GIT_EDITOR=true git rebase "$UPSTREAM_REF"; then
   cat >&2 <<EOF
 
