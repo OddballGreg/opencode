@@ -100,9 +100,20 @@ docker exec "$PG_CONTAINER" psql -U opencode -d postgres -c "CREATE DATABASE $PG
 
 log "Bootstrapping current schema into fresh pg db via the fork binary"
 "$PG_BIN" db "SELECT 1" >/dev/null 2>&1 || true   # triggers cold-boot migration (database.ts -> migration.pg.ts)
-SCHEMA_OK=$("$PG_BIN" db "SELECT to_regclass('public.session') IS NOT NULL AS ok" --format tsv 2>/dev/null | tail -1)
-[ "$SCHEMA_OK" = "t" ] || die "pg schema bootstrap failed (session table absent after cold boot)"
-echo "  schema bootstrapped."
+# Verify the session table exists. The fork's CLI prints the boolean as 'true'/'false'
+# (not psql's 't'/'f'); accept either. Retry a few times in case the cold-boot migration
+# txn is still settling.
+SCHEMA_OK=""
+for _try in 1 2 3 4 5; do
+  SCHEMA_OK=$("$PG_BIN" db "SELECT to_regclass('public.session') IS NOT NULL AS ok" --format tsv 2>/dev/null | tail -1 | tr -d '[:space:]')
+  case "$SCHEMA_OK" in true|t|1) break ;; esac
+  "$PG_BIN" db "SELECT 1" >/dev/null 2>&1 || true
+  sleep 1
+done
+case "$SCHEMA_OK" in
+  true|t|1) echo "  schema bootstrapped (ok=$SCHEMA_OK)." ;;
+  *) die "pg schema bootstrap failed (session table absent after cold boot; ok='$SCHEMA_OK')" ;;
+esac
 
 log "Migrating rows SQLite -> pg (--truncate clean load)"
 ( cd "$REPO" && OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" bun run script/migrate-sqlite-to-pg.ts --truncate )
