@@ -116,22 +116,40 @@ case "$SCHEMA_OK" in
 esac
 
 log "Migrating rows SQLite -> pg (--truncate clean load)"
-( cd "$REPO" && OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" bun run script/migrate-sqlite-to-pg.ts --truncate )
+# The migrator now exits 0 when every count gap is an accounted-for skip (Postgres-
+# incompatible oversize/FK rows), non-zero only on an UNEXPLAINED mismatch.
+if ( cd "$REPO" && OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" bun run script/migrate-sqlite-to-pg.ts --truncate ); then
+  MIGRATE_OK=1
+else
+  MIGRATE_OK=0
+fi
 
 # ---- 3. verify -------------------------------------------------------------
-log "Verifying table counts (sqlite vs pg)"
-TABLES="session message part event event_sequence todo permission project"
+# The migrator is authoritative (it just did a skip-aware self-verification against the
+# same point-in-time readonly SQLite snapshot, so it is immune to live drift). We add a
+# belt-and-braces CRITICAL-spine exact check here too. NOTE: comparing content tables
+# against the live SQLite here would be misleading if anything wrote to SQLite after the
+# migrate - but under the orchestrator everything is quiesced, so the spine is stable.
+log "Verifying (migrator skip-aware result + critical-spine exact check)"
+[ "$MIGRATE_OK" = "1" ] || die "migrator reported an UNEXPLAINED mismatch (see above). SQLite backup at $BACKUP_DIR/$STAMP"
 fail=0
-for t in $TABLES; do
+for t in session event_sequence todo project project_directory; do
   sq=$(sqlite3 "$LIVE_SQLITE" "SELECT count(*) FROM $t;" 2>/dev/null || echo NA)
   pg=$("$PG_BIN" db "SELECT count(*)::int AS n FROM $t" --format tsv 2>/dev/null | tail -1 || echo NA)
   if [ "$sq" = "$pg" ]; then
-    printf '  %-16s sqlite=%-8s pg=%-8s OK\n' "$t" "$sq" "$pg"
+    printf '  %-18s sqlite=%-9s pg=%-9s OK (critical)\n' "$t" "$sq" "$pg"
   else
-    printf '  %-16s sqlite=%-8s pg=%-8s MISMATCH\n' "$t" "$sq" "$pg"; fail=1
+    printf '  %-18s sqlite=%-9s pg=%-9s MISMATCH (critical!)\n' "$t" "$sq" "$pg"; fail=1
   fi
 done
-[ "$fail" = "0" ] || die "count mismatch - inspect before reopening. SQLite backup at $BACKUP_DIR/$STAMP"
+[ "$fail" = "0" ] || die "CRITICAL spine mismatch - do NOT reopen. SQLite backup at $BACKUP_DIR/$STAMP"
+# Report any Postgres-incompatible oversized sessions that were skipped, so you can
+# confirm none are sessions you care about.
+BIG=$(sqlite3 "$LIVE_SQLITE" "SELECT count(*) FROM message WHERE length(data) > 250000000;" 2>/dev/null || echo 0)
+if [ "${BIG:-0}" != "0" ]; then
+  log "Note: $BIG oversized message(s) (>250MB) cannot be stored in Postgres jsonb; their rows were skipped. Owning sessions:"
+  sqlite3 "$LIVE_SQLITE" "SELECT DISTINCT s.id, substr(COALESCE(s.title,'-'),1,60) FROM message m JOIN session s ON s.id=m.session_id WHERE length(m.data) > 250000000;" 2>/dev/null | sed 's/^/    /' || true
+fi
 
 log "CUTOVER COMPLETE. pg is now populated + current-schema."
 cat <<EOF
