@@ -241,17 +241,27 @@ export const layerWith = (options?: LayerOptions) =>
                     .transaction(
                       () =>
                         Effect.gen(function* () {
-                          // Postgres only: lock this aggregate's event_sequence row FOR
-                          // UPDATE so the read-latest/insert-latest+1 read-modify-write is
-                          // serialized across concurrent transactions. Without this, two
-                          // concurrent writers read the same `latest`, both try to insert
-                          // `latest+1`, and one hits the (aggregate_id, seq) unique index
-                          // -> Effect.orDie -> the streaming turn dies. SQLite's single
-                          // writer serializes this implicitly, so the lock is pg-only.
+                          // Postgres only: serialize the read-latest/insert-latest+1
+                          // read-modify-write across concurrent transactions for this
+                          // aggregate. Without it, two concurrent writers read the same
+                          // `latest`, both insert `latest+1`, and one hits the
+                          // (aggregate_id, seq) unique index -> Effect.orDie -> the
+                          // streaming turn dies. SQLite's single writer serializes this
+                          // implicitly, so this is pg-only.
+                          //
+                          // We UPSERT-then-lock rather than a plain `... FOR UPDATE`,
+                          // because FOR UPDATE locks nothing when the row does not yet
+                          // exist (a brand-new aggregate's first event) - which would
+                          // leave the first-event case racy. INSERT ... ON CONFLICT DO
+                          // UPDATE both creates the row if missing and row-locks it
+                          // (the conflicting/updated row is locked for this txn), with a
+                          // no-op update (seq = its current value) that never regresses
+                          // the counter. The subsequent SELECT then reads the locked row.
                           if (dialect === "pg") {
                             yield* db
-                              .get(
-                                sql`select seq from event_sequence where aggregate_id = ${aggregateID} for update`,
+                              .run(
+                                sql`insert into event_sequence (aggregate_id, seq) values (${aggregateID}, -1)
+                                    on conflict (aggregate_id) do update set seq = event_sequence.seq`,
                               )
                               .pipe(Effect.orDie)
                           }
