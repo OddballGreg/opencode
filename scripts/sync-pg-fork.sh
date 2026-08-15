@@ -71,6 +71,15 @@ git fetch origin --tags
 git fetch fork --tags || true
 
 UP_VER="$(git show "${UPSTREAM_REF}:package.json" | sed -nE 's/.*"version": *"([0-9.]+)".*/\1/p' | head -1)"
+# Newer upstream monorepos dropped the "version" field from the ROOT package.json
+# (it now lives only in packages/opencode/package.json). Fall back to that, then
+# to the tag name itself, so version detection survives that upstream refactor.
+if [[ -z "$UP_VER" ]]; then
+  UP_VER="$(git show "${UPSTREAM_REF}:packages/opencode/package.json" 2>/dev/null | sed -nE 's/.*"version": *"([0-9.]+)".*/\1/p' | head -1)"
+fi
+if [[ -z "$UP_VER" ]]; then
+  UP_VER="$(printf '%s' "$UPSTREAM_REF" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')"
+fi
 [[ -n "$UP_VER" ]] || { echo "could not read upstream version from ${UPSTREAM_REF}" >&2; exit 1; }
 NEW_BRANCH="${PG_BRANCH_PREFIX}${UP_VER}"
 log "Upstream ${UPSTREAM_REF} is v${UP_VER}; target branch ${NEW_BRANCH}"
