@@ -31,6 +31,35 @@ point-in-time recovery, no single-file write lock, and robustness of opencode's
 (non-retrying) event write path once the per-aggregate lock is in place. At real
 interactive event rates the throughput cost is irrelevant.
 
+### Prior predicate (this is a well-trodden path)
+
+Choosing a local Postgres over SQLite specifically because of **write
+contention** is documented, mainstream practice — not a novel workaround:
+
+- **SQLite's own maintainers** say so. [`sqlite.org/whentouse.html`](https://www.sqlite.org/whentouse.html)
+  — *"SQLite supports an unlimited number of simultaneous readers, but it will
+  only allow one writer at any instant in time… some applications require more
+  concurrency, and those applications may need to seek a different solution."*
+  Their decision checklist is explicit: **"Many concurrent writers? → choose
+  client/server,"** because a client/server engine *"has a long-running server
+  process at hand to coordinate access [and] can usually handle far more write
+  concurrency than SQLite ever will."* Our symptom — many concurrent opencode
+  processes hitting one file, `database is locked`, slow session starts — is the
+  textbook case they point to Postgres for.
+- **The industry consensus nuance** (e.g. Fly.io's widely-discussed
+  "all-in on server-side SQLite" thread) is the same trade we measured: SQLite
+  excels at **read latency + single-writer operational simplicity**; under
+  **multi-writer** load its database-level locking makes it *marginally poorer
+  than Postgres*, and write traffic is where people reach for a server engine.
+- **Maintenance/HA dimension:** SQLite `VACUUM` takes a whole-database lock and
+  the single-file model complicates online backup — well-known reasons
+  write-heavy local workloads outgrow it. Postgres does `VACUUM`/backup online.
+
+Net: the migration is defensible by the primary source (SQLite's own guidance)
+and by common practice. The measured throughput cost is the expected, accepted
+trade for the concurrency + operational headroom — and is irrelevant at
+opencode's real interactive event rates.
+
 ---
 
 ## The pieces
