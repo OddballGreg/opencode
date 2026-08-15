@@ -9,6 +9,12 @@ backend removes that contention (proven: a 20-writer concurrency soak passes
 This document is the canonical, repeatable procedure for keeping the fork in
 step with upstream and deploying it **side-by-side** with the stock binary.
 
+> **Start here for the big picture:** `docs/POSTGRES-BACKEND-README.md` (operating
+> guide, the launch shim, ongoing maintenance, rollback). This file is the
+> low-level sync/deploy detail it references.
+> Memory-module integration + power-use caveat:
+> `opencode-memory` repo → `docs/postgres-backend-integration.md`.
+>
 > Memory refs: `#129961` (plan), `#56754` (original cutover). Keep both current.
 
 ---
