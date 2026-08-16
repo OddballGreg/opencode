@@ -34,6 +34,60 @@ interface Config {
 const classifyPgError = (cause: unknown, message: string) =>
   new SqlError({ reason: new UnknownError({ cause, message, operation: "execute" }) })
 
+/**
+ * Build a diagnostic error message for a failed `db.unsafe(query, params)`.
+ *
+ * Without this, a failed statement surfaces as drizzle's generic
+ * `EffectDrizzleQueryError`, whose formatter renders the params array via
+ * template interpolation (`params: ${this.params}`) — i.e. `Array.toString()`,
+ * so every object param prints as the useless `[object Object]` and the real
+ * Postgres cause is buried. That makes transient contention failures (pool
+ * reserve timeout, serialization/deadlock on an `onConflictDoUpdate`) look like
+ * a jsonb-encoding bug when they are not.
+ *
+ * We capture: the SQL text, a JSON-serialized, size-bounded preview of the
+ * params (objects become real JSON, not `[object Object]`), and the underlying
+ * driver/Postgres error message so the true cause is visible in logs.
+ */
+const MAX_PARAM_PREVIEW = 200
+const formatParamsPreview = (params: ReadonlyArray<unknown>): string => {
+  try {
+    return JSON.stringify(
+      params.map((p) => {
+        if (p === null || p === undefined) return p
+        if (typeof p === "bigint") return p.toString()
+        if (typeof p === "string") return p.length > MAX_PARAM_PREVIEW ? p.slice(0, MAX_PARAM_PREVIEW) + "…" : p
+        if (typeof p === "object") {
+          const json = (() => {
+            try {
+              return JSON.stringify(p)
+            } catch {
+              return String(p)
+            }
+          })()
+          return json.length > MAX_PARAM_PREVIEW ? json.slice(0, MAX_PARAM_PREVIEW) + "…" : json
+        }
+        return p
+      }),
+    )
+  } catch {
+    return "<unserializable params>"
+  }
+}
+const describeCause = (cause: unknown): string => {
+  if (cause instanceof Error) return `${cause.name}: ${cause.message}`
+  if (cause && typeof cause === "object") {
+    try {
+      return JSON.stringify(cause)
+    } catch {
+      return String(cause)
+    }
+  }
+  return String(cause)
+}
+const executeErrorMessage = (query: string, params: ReadonlyArray<unknown>, cause: unknown): string =>
+  `Failed to execute statement: ${describeCause(cause)}\nquery: ${query}\nparams: ${formatParamsPreview(params)}`
+
 const escapePg = Statement.defaultEscape('"')
 
 const makeCompiler = (transform?: (str: string) => string): Statement.Compiler =>
@@ -74,7 +128,7 @@ const make = (options: Config) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
           try: () => db.unsafe(query, params as any[]) as unknown as Promise<Array<Record<string, unknown>>>,
-          catch: (cause) => classifyPgError(cause, "Failed to execute statement"),
+          catch: (cause) => classifyPgError(cause, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<Record<string, unknown>>))
 
     const runValuesOn =
@@ -82,7 +136,7 @@ const make = (options: Config) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
           try: () => db.unsafe(query, params as any[]).values() as unknown as Promise<Array<unknown[]>>,
-          catch: (cause) => classifyPgError(cause, "Failed to execute statement"),
+          catch: (cause) => classifyPgError(cause, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<unknown[]>))
 
     const connectionFor = (db: SQL): PgConnection => {
