@@ -73,6 +73,7 @@ rebase pain. Files touched, by purpose:
 | **Concurrency safety** | `migration.pg.ts`, `pg.bun.ts` | `pg_advisory_xact_lock` guards the bootstrap transaction so N processes booting at once don't race on `CREATE TABLE`; a `to_regclass('migration')` + completed-set **fast path** skips the heavyweight lock tx on steady-state boots. |
 | **Migrator (offline)** | `script/migrate-sqlite-to-pg.ts` | One-shot SQLite→pg data migrator. Reads `OPENCODE_DATABASE_URL`. Not part of boot. |
 | **Sync tooling** | `packages/core/drizzle.pg.config.ts`, `scripts/sync-pg-fork.sh`, `docs/POSTGRES-FORK-SYNC.md` | pg drizzle config used to regenerate `0001_init.sql`; the sync script; this doc. |
+| **tool.execute.before short-circuit** | `packages/opencode/src/session/tools.ts`, `packages/plugin/src/index.ts` | Carried fork patch (upstream PR #32679 auto-closed by a cleanup bot). Adds an optional `result?: string` to the `tool.execute.before` hook output; when a plugin sets it, the tool is skipped and that string is returned instead (native + MCP paths), with `tool.execute.after` still running on the substitute. Lets the memory plugin answer a read/grep/glob with an indexed summary. Backwards compatible (unset `result` = old behaviour). Re-apply onto the current `tools.ts`/`index.ts` on rebase; do not blind cherry-pick the original commit (it targets an older `tools.ts`). |
 
 ### Why a squashed `0001_init.sql`?
 
