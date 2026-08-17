@@ -29,6 +29,12 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$LOG"; }
 set -a; . "$PG_ENV"; set +a
 [ -n "${OPENCODE_DATABASE_URL:-}" ] || { echo "OPENCODE_DATABASE_URL not set" >&2; exit 1; }
 
+# Resolve bun absolutely: systemd user units run with a minimal PATH that omits
+# ~/.bun/bin, which silently broke the migrator (ghavenga/opencode-memory#356).
+BUN="${BUN:-$HOME/.bun/bin/bun}"
+[ -x "$BUN" ] || BUN="$(command -v bun || true)"
+[ -n "$BUN" ] && [ -x "$BUN" ] || { echo "bun not found (looked in \$HOME/.bun/bin and PATH)" >&2; log "FATAL: bun not found"; exit 1; }
+
 # Single-flight: never overlap two exports (they'd contend on the bridge file).
 exec 9>"$LOCK"
 if ! flock -n 9; then
@@ -48,7 +54,7 @@ log "bridge export start -> $BRIDGE_DB"
 # fatal; instead we validate the bridge is USABLE: the session spine must match within
 # a drift tolerance, and the file must be a valid sqlite db with the expected tables.
 ( cd "$REPO" && SQLITE_OUT="$BRIDGE_DB" OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" \
-    bun run script/migrate-pg-to-sqlite.ts >> "$LOG" 2>&1 ) || log "migrator exited non-zero (expected under drift/oversize skips; validating usability instead)"
+    "$BUN" run script/migrate-pg-to-sqlite.ts >> "$LOG" 2>&1 ) || log "migrator exited non-zero (expected under drift/oversize skips; validating usability instead)"
 
 # Usability check: bridge db opens, has a session table, and session count is
 # within DRIFT_TOL of pg (spine parity). This catches a genuinely broken export
