@@ -7,18 +7,24 @@
 # See docs/POSTGRES-FORK-SYNC.md for the full narrative.
 #
 # Usage:
-#   scripts/sync-pg-fork.sh [--upstream <ref>] [--no-soak] [--fast]
+#   scripts/sync-pg-fork.sh [--upstream <ref>] [--no-soak] [--fast] [--push]
 #
 #   --upstream <ref>  Upstream ref to rebase onto (default: origin/dev).
 #   --fast            Build without embedding the web UI (quicker; CLI-only test binary).
 #   --no-soak         Skip the concurrency soak.
+#   --push            After a passing soak, push the rebuilt branch to the `fork`
+#                     remote so there is always a current, shareable branch on
+#                     GitHub (OddballGreg/opencode). Off by default. Only pushes
+#                     the pg branch; never opens MRs and never force-pushes over
+#                     unrelated history.
 #
 # SAFETY (hard rules, mirrored from memory #129961 / #56754):
 #   * NEVER overwrites ~/.opencode/bin/opencode (the live binary). Only writes
 #     ~/.opencode/bin/opencode-pg.
 #   * NEVER runs destructive migrations against the real `opencode` pg database.
 #     The soak uses a throwaway db that is dropped afterwards.
-#   * NEVER pushes to any remote and NEVER opens MRs.
+#   * Only pushes when --push is given, and only the pg branch to `fork`. Never
+#     opens MRs.
 #   * NEVER prints the Postgres password (URLs are redacted in all output).
 #
 set -euo pipefail
@@ -40,12 +46,14 @@ UPSTREAM_REF="origin/dev"
 PATCH_SOURCE="${OPENCODE_PG_PATCH_SOURCE:-feat/pg-to-sqlite-migrator}"
 DO_SOAK=1
 FAST_BUILD=0
+DO_PUSH=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upstream) UPSTREAM_REF="$2"; shift 2 ;;
     --patch-source) PATCH_SOURCE="$2"; shift 2 ;;
     --no-soak)  DO_SOAK=0; shift ;;
+    --push)     DO_PUSH=1; shift ;;
     --fast)     FAST_BUILD=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -184,6 +192,17 @@ if [[ "$DO_SOAK" == "1" ]]; then
   else
     echo "   SOAK FAILED" >&2; exit 1
   fi
+fi
+
+# ---- push the rebuilt branch to the fork remote (opt-in) ------------------
+# Keeps a current, shareable branch on GitHub (OddballGreg/opencode) so the
+# fork never drifts 1000+ commits behind local again. Uses --no-verify because
+# the upstream husky pre-push hook runs a full turbo typecheck that can SIGSEGV
+# on this monorepo; the soak above is our real gate, not the hook.
+if [[ "$DO_PUSH" == "1" ]]; then
+  log "Pushing ${NEW_BRANCH} to fork remote"
+  git push --no-verify fork "${NEW_BRANCH}" 2>&1 | redact
+  echo "   pushed ${NEW_BRANCH} -> fork"
 fi
 
 log "DONE. opencode-pg @ v${UP_VER} built and verified side-by-side."
