@@ -148,8 +148,20 @@ BUILT="dist/opencode-linux-x64/bin/opencode"
 popd >/dev/null
 
 log "Installing to SEPARATE path ${PG_BIN} (live binary ${LIVE_BIN} untouched)"
-cp "$REPO/packages/opencode/$BUILT" "$PG_BIN"
-chmod +x "$PG_BIN"
+# Install via stage-then-atomic-rename, NOT a plain `cp` over $PG_BIN.
+# A plain cp fails with "Text file busy" (ETXTBSY) when opencode-pg is the
+# currently-running binary of a live pg-default session. Renaming a freshly
+# staged file over the target swaps the directory entry without touching the
+# running inode, so the live session keeps its old file and new invocations
+# pick up the rebuilt binary. Stage on the SAME filesystem as $PG_BIN so the
+# rename is atomic. Back up the outgoing binary first for one-flag rollback.
+if [[ -e "$PG_BIN" ]]; then
+  cp -p "$PG_BIN" "$PG_BIN.prev-$(date +%Y%m%d-%H%M%S)"
+fi
+PG_BIN_STAGE="$(dirname "$PG_BIN")/.$(basename "$PG_BIN").new.$$"
+cp "$REPO/packages/opencode/$BUILT" "$PG_BIN_STAGE"
+chmod +x "$PG_BIN_STAGE"
+mv -f "$PG_BIN_STAGE" "$PG_BIN"
 echo "   opencode-pg version: $("$PG_BIN" --version)"
 echo "   live opencode version: $("$LIVE_BIN" --version 2>/dev/null || echo '(unreadable)')"
 
