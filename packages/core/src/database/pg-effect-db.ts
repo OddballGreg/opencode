@@ -72,13 +72,46 @@ type RawQuery = SQL | SQLWrapper | string
  * uses `drizzle-orm/sqlite-core` and its own codecs, so it is unaffected.
  */
 const parseJsonIfString = (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value)
-const identityParam = (value: unknown) => value
+/**
+ * Write-side json/jsonb param normalizer for the Bun.SQL driver.
+ *
+ * We must hand Bun a JS **object** (not a pre-stringified string), because Bun
+ * serializes an object into a proper jsonb value whereas a string is stored
+ * double-encoded (see the read-side `parseJsonIfString` defense and the codec
+ * notes above). Earlier this was a plain identity function.
+ *
+ * The trap: Bun serializes the object with `JSON.stringify`, which **throws**
+ * (`JSON.stringify cannot serialize BigInt`) if the value tree contains a JS
+ * `bigint` anywhere. Part `data` payloads (tool state, usage/token counters,
+ * timing) can carry a bigint, so an identity param made the whole
+ * `insert into "part" ... on conflict do update` throw and abort the turn
+ * mid-stream — surfacing only as drizzle's `[object Object]` param render.
+ *
+ * Fix: return a bigint-safe **deep clone** of the value (bigint -> number),
+ * still as an object so Bun serializes it as real jsonb. Non-bigint payloads
+ * are unaffected; the clone is only paid on write. Numbers beyond
+ * `Number.MAX_SAFE_INTEGER` are not expected in these payloads (token/timing
+ * counters), matching the `bigint({ mode: "number" })` read mapping.
+ */
+const stripBigInt = (value: unknown): unknown => {
+  if (typeof value === "bigint") return Number(value)
+  if (value === null || typeof value !== "object") return value
+  if (Array.isArray(value)) return value.map(stripBigInt)
+  // Preserve values that define their own JSON form (e.g. Date via toJSON).
+  if (typeof (value as any).toJSON === "function") return value
+  const out: Record<string, unknown> = {}
+  for (const key in value as Record<string, unknown>) {
+    out[key] = stripBigInt((value as Record<string, unknown>)[key])
+  }
+  return out
+}
+const jsonParam = (value: unknown) => stripBigInt(value)
 // Refine the full `effectPgCodecs` (NOT the bare `genericPgCodecs`) so all the
 // other normalizers it adds — notably `bigint`/`int8` -> Number, which makes
 // `bigint({ mode: "number" })` columns read back as JS numbers — are preserved.
 const pgCodecs = refineCodecs(effectPgCodecs as any, {
-  json: { normalize: parseJsonIfString, normalizeParam: identityParam },
-  jsonb: { normalize: parseJsonIfString, normalizeParam: identityParam },
+  json: { normalize: parseJsonIfString, normalizeParam: jsonParam },
+  jsonb: { normalize: parseJsonIfString, normalizeParam: jsonParam },
 } as any)
 
 /**
