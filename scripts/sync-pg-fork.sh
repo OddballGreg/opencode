@@ -168,7 +168,10 @@ echo "   live opencode version: $("$LIVE_BIN" --version 2>/dev/null || echo '(un
 # ---- 5. verify ------------------------------------------------------------
 log "Verification"
 # 5a. SQLite fallback intact when no env (must NOT touch pg or live opencode.db).
-NOENV_N="$(env -u OPENCODE_DATABASE_URL "$PG_BIN" db "SELECT count(*)::int AS n FROM session" --format tsv | tail -1)"
+# Use a DIALECT-PORTABLE query here: this path resolves to SQLite, where the
+# postgres `::int` cast is a syntax error ("unrecognized token: :"). Plain
+# count(*) works on both dialects; the pg-specific cast is exercised in 5b.
+NOENV_N="$(env -u OPENCODE_DATABASE_URL "$PG_BIN" db "SELECT count(*) AS n FROM session" --format tsv | tail -1)"
 echo "   [sqlite fallback, no env] session count in channel db = ${NOENV_N} (expected 0 on a fresh channel db)"
 rm -f "$HOME/.local/share/opencode/opencode-feat-postgres-backend-v${UP_VER}.db"* 2>/dev/null || true
 
