@@ -92,13 +92,44 @@ const parseJsonIfString = (value: unknown) => (typeof value === "string" ? JSON.
  * are unaffected; the clone is only paid on write. Numbers beyond
  * `Number.MAX_SAFE_INTEGER` are not expected in these payloads (token/timing
  * counters), matching the `bigint({ mode: "number" })` read mapping.
+ *
+ * The second trap (same failure signature, different cause): Postgres `jsonb`
+ * is stricter than SQLite's `TEXT` about what a JSON *string* may contain.
+ * `JSON.stringify` happily emits `\u0000` and lone surrogates, but the server
+ * rejects both — `unsupported Unicode escape sequence` for NUL, and
+ * `invalid input syntax for type json` for an unpaired surrogate. Any tool
+ * that puts undecoded binary into a part payload (e.g. `webfetch` on a PDF)
+ * therefore aborted the same `insert into "part" ... on conflict do update`
+ * mid-turn, killing the subagent and again surfacing only as drizzle's
+ * misleading `[object Object]` param render.
+ *
+ * So the walker also sanitizes strings: drop NUL, and replace unpaired
+ * surrogates with U+FFFD. Well-formed text (including valid surrogate pairs
+ * for emoji/astral characters) is left byte-for-byte intact.
  */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+const sanitizeString = (value: string): string => {
+  let out = value
+  if (out.includes("\u0000")) out = out.replaceAll("\u0000", "")
+  // Cheap guard: only pay the regex when a surrogate code unit is present.
+  if (LONE_SURROGATE.test(out)) {
+    LONE_SURROGATE.lastIndex = 0
+    out = out.replace(LONE_SURROGATE, "\uFFFD")
+  }
+  LONE_SURROGATE.lastIndex = 0
+  return out
+}
 const stripBigInt = (value: unknown): unknown => {
   if (typeof value === "bigint") return Number(value)
+  if (typeof value === "string") return sanitizeString(value)
   if (value === null || typeof value !== "object") return value
   if (Array.isArray(value)) return value.map(stripBigInt)
-  // Preserve values that define their own JSON form (e.g. Date via toJSON).
-  if (typeof (value as any).toJSON === "function") return value
+  // Values that define their own JSON form (e.g. Date via toJSON) still have to
+  // be sanitized: `toJSON()` can return a string carrying NUL/lone surrogates.
+  if (typeof (value as any).toJSON === "function") {
+    const json = (value as any).toJSON()
+    return typeof json === "string" ? sanitizeString(json) : stripBigInt(json)
+  }
   const out: Record<string, unknown> = {}
   for (const key in value as Record<string, unknown>) {
     out[key] = stripBigInt((value as Record<string, unknown>)[key])
