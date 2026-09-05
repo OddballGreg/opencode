@@ -137,12 +137,40 @@ const stripBigInt = (value: unknown): unknown => {
   return out
 }
 const jsonParam = (value: unknown) => stripBigInt(value)
+/**
+ * Exported for tests only: the write-side json/jsonb param normalizer. Kept
+ * exported so the guarantees above (bigint coercion, NUL removal, lone
+ * surrogate replacement, and preservation of valid astral pairs) are pinned by
+ * unit tests without needing a live Postgres server.
+ */
+export const normalizeJsonParamForTest = jsonParam
+/**
+ * Write-side normalizer for `text`-family columns.
+ *
+ * `text` is exposed to a *narrower* version of the same class as the json
+ * payloads above. Postgres refuses a NUL byte in any `text` value with
+ * `invalid byte sequence for encoding "UTF8": 0x00`, whereas SQLite `TEXT`
+ * stores it happily. Lone surrogates are *tolerated* here (unlike jsonb) —
+ * the server replaces them on its own — so we only strip NUL and otherwise
+ * leave the value byte-for-byte intact.
+ *
+ * The exposure is smaller than the json path (most text columns are ids,
+ * paths and enum-ish tags) but not empty: `session.title` is model-derived
+ * free text, so a tool that round-trips binary through a title would hit it.
+ */
+const textParam = (value: unknown) =>
+  typeof value === "string" && value.includes("\u0000") ? value.replaceAll("\u0000", "") : value
+/** Exported for tests only: see `normalizeJsonParamForTest`. */
+export const normalizeTextParamForTest = textParam
 // Refine the full `effectPgCodecs` (NOT the bare `genericPgCodecs`) so all the
 // other normalizers it adds — notably `bigint`/`int8` -> Number, which makes
 // `bigint({ mode: "number" })` columns read back as JS numbers — are preserved.
 const pgCodecs = refineCodecs(effectPgCodecs as any, {
   json: { normalize: parseJsonIfString, normalizeParam: jsonParam },
   jsonb: { normalize: parseJsonIfString, normalizeParam: jsonParam },
+  text: { normalizeParam: textParam },
+  varchar: { normalizeParam: textParam },
+  char: { normalizeParam: textParam },
 } as any)
 
 /**
