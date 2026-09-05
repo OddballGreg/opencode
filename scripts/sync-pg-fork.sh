@@ -47,6 +47,7 @@ PATCH_SOURCE="${OPENCODE_PG_PATCH_SOURCE:-feat/pg-to-sqlite-migrator}"
 DO_SOAK=1
 FAST_BUILD=0
 DO_PUSH=0
+SKIP_PATCH_TESTS="${SKIP_PATCH_TESTS:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --no-soak)  DO_SOAK=0; shift ;;
     --push)     DO_PUSH=1; shift ;;
     --fast)     FAST_BUILD=1; shift ;;
+    --skip-patch-tests) SKIP_PATCH_TESTS=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -112,6 +114,68 @@ if ! GIT_EDITOR=true git rebase "$UPSTREAM_REF"; then
    finish the rebase manually and continue from step 3 below.
 EOF
   exit 1
+fi
+
+# ---- 2b. patch-durability guard -------------------------------------------
+# The rebase above replays the pg patch set onto a new upstream tag. A patch
+# can be silently DROPPED (upstream refactored the file out from under it, or a
+# conflict was resolved by taking upstream's side) and the build would still
+# succeed -- the bug just quietly comes back. These are the load-bearing
+# correctness patches whose loss is invisible until it corrupts a live session,
+# so assert each one is still present rather than trusting the rebase.
+#
+# Add a line here whenever a fix of that kind lands. Keep the greps loose
+# enough to survive reformatting but tight enough to prove intent.
+log "Verifying load-bearing pg patches survived the rebase"
+PGDB="packages/core/src/database/pg-effect-db.ts"
+durability_fail=0
+check_patch() {
+  # $1 = human label, $2 = min occurrences, $3 = file, $4 = grep -E pattern
+  local n
+  # NB: `grep -c` prints 0 and exits 1 on no-match, so a `|| echo 0` fallback
+  # would emit "0\n0" and break the arithmetic below. Swallow the exit code
+  # instead, then default an empty/absent-file result to 0.
+  n="$(grep -cE "$4" "$3" 2>/dev/null || true)"
+  n="${n:-0}"
+  if [[ "$n" -lt "$2" ]]; then
+    echo "   MISSING: $1 (found ${n}, expected >= ${2}) in $3" >&2
+    durability_fail=1
+  else
+    echo "   ok: $1 (${n})"
+  fi
+}
+# bigint -> number, or Bun's JSON.stringify throws and aborts the part insert.
+check_patch "jsonb bigint normalizer (stripBigInt)"      2 "$PGDB" 'stripBigInt'
+# NUL / lone surrogates in jsonb are hard server errors; see sanitizeString.
+check_patch "jsonb string sanitizer (sanitizeString)"    2 "$PGDB" 'sanitizeString'
+check_patch "jsonb NUL strip"                            1 "$PGDB" 'replaceAll\("\\u0000", ""\)'
+check_patch "jsonb lone-surrogate guard"                 1 "$PGDB" 'LONE_SURROGATE'
+# NUL in a text param is 'invalid byte sequence for encoding UTF8: 0x00'.
+check_patch "text param NUL strip (textParam)"           2 "$PGDB" 'textParam'
+# MAX_STEPS_PROMPT must be a USER turn or Duo 400s on resume (prefill-400).
+check_patch "prefill-400 guard (MAX_STEPS_PROMPT as user)" 1 \
+  "packages/core/src/session/runner/llm.ts" 'Message\.user\(MAX_STEPS_PROMPT\)'
+if [[ "$durability_fail" == "1" ]]; then
+  cat >&2 <<'EOF'
+
+A load-bearing pg patch did NOT survive the rebase. Do not ship this build:
+the fix it encodes is gone and the bug it prevents is live again.
+
+Inspect the rebase, re-apply the missing commit onto the patch source
+(feat/pg-to-sqlite-migrator) so it carries forward, then re-run this script.
+EOF
+  exit 1
+fi
+
+# Unit tests pin the normalizers' exact behaviour without needing a server.
+if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
+  log "Running pg param normalizer unit tests"
+  pushd packages/core >/dev/null
+  bun test test/pg-json-param.test.ts || {
+    echo "pg param normalizer tests FAILED -- refusing to ship this build" >&2
+    exit 1
+  }
+  popd >/dev/null
 fi
 
 # ---- 3. regenerate the squashed pg bootstrap migration --------------------
