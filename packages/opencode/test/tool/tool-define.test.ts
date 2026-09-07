@@ -6,6 +6,7 @@ import { MessageID, SessionID } from "../../src/session/schema"
 import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { testEffect } from "../lib/effect"
+import * as QuestionTool from "@/tool/question"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([Truncate.node, Agent.node])))
 
@@ -288,6 +289,105 @@ describe("Tool.coerceJsonStringProperties", () => {
   it.effect("only rewrites the offending property", () =>
     Effect.sync(() => {
       expect(coerce({ good: "keep me", bad: "[1]", n: 3 })).toEqual({ good: "keep me", bad: [1], n: 3 })
+    }),
+  )
+})
+
+// The `question` tool's declared repair. Models very often send `header` +
+// `options` and omit `question` entirely (126 of 206 recorded argument
+// failures on this instance; 125 of those carried both other fields).
+describe("Tool.Def.repairArguments", () => {
+  const questionish = Schema.Struct({
+    questions: Schema.Array(
+      Schema.Struct({ question: Schema.String, header: Schema.String, options: Schema.Array(Schema.String) }),
+    ),
+  })
+
+  const defineWithRepair = (id: string, calls: unknown[]) =>
+    Effect.gen(function* () {
+      const info = yield* Tool.define(
+        id,
+        Effect.succeed({
+          description: "test tool",
+          parameters: questionish as any,
+          repairArguments: QuestionTool.repairArguments,
+          execute(args: unknown) {
+            calls.push(args)
+            return Effect.succeed({ title: "ok", output: "ok", metadata: { truncated: false } })
+          },
+        }),
+      )
+      const tool = yield* info.init()
+      return tool.execute as unknown as (args: unknown, ctx: Tool.Context) => ReturnType<typeof tool.execute>
+    })
+
+  it.effect("backfills a missing question from header", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineWithRepair("qrepair", calls)
+
+      const exit = yield* execute(
+        { questions: [{ header: "Which first?", options: ["a", "b"] }] },
+        makeCtx(),
+      ).pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(calls).toEqual([{ questions: [{ question: "Which first?", header: "Which first?", options: ["a", "b"] }] }])
+    }),
+  )
+
+  it.effect("recovers a payload with BOTH faults at once", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineWithRepair("qboth", calls)
+
+      // Stringified array AND a missing `question` -- the exact reported shape.
+      const raw = JSON.stringify([{ header: "VAC perm items", options: ["a"] }])
+      const exit = yield* execute({ questions: raw }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(calls).toEqual([{ questions: [{ question: "VAC perm items", header: "VAC perm items", options: ["a"] }] }])
+    }),
+  )
+
+  it.effect("never overwrites a question the model did supply", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineWithRepair("qkeep", calls)
+      const questions = [{ question: "Real prompt", header: "Short", options: ["a"] }]
+
+      const exit = yield* execute({ questions }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(calls).toEqual([{ questions }])
+    }),
+  )
+
+  it.effect("declines when there is no header to derive from", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineWithRepair("qnohdr", calls)
+
+      const exit = yield* execute({ questions: [{ options: ["a"] }] }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(calls).toEqual([])
+    }),
+  )
+
+  it.effect("treats a blank header as absent", () =>
+    Effect.sync(() => {
+      const args = { questions: [{ header: "   ", options: ["a"] }] }
+      expect(QuestionTool.repairArguments(args)).toBe(args)
+    }),
+  )
+
+  it.effect("returns an identical reference when nothing needed repair", () =>
+    Effect.sync(() => {
+      const args = { questions: [{ question: "Q", header: "H", options: [] }] }
+      expect(QuestionTool.repairArguments(args)).toBe(args)
+      const notQuestions = { other: 1 }
+      expect(QuestionTool.repairArguments(notQuestions)).toBe(notQuestions)
     }),
   )
 })

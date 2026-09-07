@@ -106,6 +106,15 @@ export interface Def<
   jsonSchema?: JSONSchema7
   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
   formatValidationError?(error: unknown): string
+  /**
+   * Optional last-chance repair for a payload that failed the parameter schema.
+   *
+   * Runs only after a strict decode has already failed, and its result is fed
+   * back through the SAME schema -- so a tool can forgive a known model
+   * mistake (a missing field it can derive) without loosening what the schema
+   * actually accepts. Return the input unchanged to decline.
+   */
+  repairArguments?(args: unknown): unknown
 }
 export type DefWithoutID<
   Parameters extends Schema.Decoder<unknown> = Schema.Decoder<unknown>,
@@ -162,13 +171,32 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
         return Effect.gen(function* () {
-          // Decode strictly first; only a failure pays the salvage attempt, so
-          // the common (well-formed) path is unchanged.
+          // Decode strictly first; only a failure pays the salvage attempts, so
+          // the common (well-formed) path is unchanged. Generic JSON-string
+          // coercion runs first, then any tool-declared repair, then both
+          // together -- so a payload with two independent faults (e.g. a
+          // stringified array that also omits a derivable field) still lands.
           const decoded = yield* decode(args).pipe(
             Effect.catch((error: unknown) => {
+              const repair = toolInfo.repairArguments
+              const candidates: unknown[] = []
               const coerced = coerceJsonStringProperties(args)
-              if (coerced === args) return Effect.fail(error)
-              return decode(coerced).pipe(Effect.mapError(() => error))
+              if (coerced !== args) candidates.push(coerced)
+              if (repair) {
+                const repaired = repair(args)
+                if (repaired !== args) candidates.push(repaired)
+                if (coerced !== args) {
+                  const both = repair(coerced)
+                  if (both !== coerced) candidates.push(both)
+                }
+              }
+              // Report the ORIGINAL error if nothing salvageable was produced,
+              // so the model still sees the real schema problem and its path.
+              let attempt = Effect.fail(error) as Effect.Effect<unknown, unknown, never>
+              for (const candidate of candidates) {
+                attempt = attempt.pipe(Effect.catch(() => decode(candidate) as Effect.Effect<unknown, unknown, never>))
+              }
+              return attempt.pipe(Effect.mapError(() => error))
             }),
             Effect.mapError(
               (error) =>
