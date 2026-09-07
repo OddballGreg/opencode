@@ -162,6 +162,14 @@ check_patch "prefill-400 trailing-user invariant" 1 \
   "packages/core/src/session/runner/to-llm-message.ts" 'ensureTrailingUserMessage'
 check_patch "prefill-400 invariant is applied to requests" 1 \
   "packages/core/src/session/runner/llm.ts" 'ensureTrailingUserMessage\('
+# Tool-argument salvage: models send nested args as JSON strings, and omit the
+# question tool's `question` field. Both cost a discarded call + a re-ask.
+check_patch "tool arg JSON-string coercion" 1 \
+  "packages/opencode/src/tool/tool.ts" 'coerceJsonStringProperties'
+check_patch "tool repairArguments hook applied" 1 \
+  "packages/opencode/src/tool/tool.ts" 'repairArguments'
+check_patch "question tool header backfill" 1 \
+  "packages/opencode/src/tool/question.ts" 'repairArguments'
 if [[ "$durability_fail" == "1" ]]; then
   cat >&2 <<'EOF'
 
@@ -176,10 +184,17 @@ fi
 
 # Unit tests pin the normalizers' exact behaviour without needing a server.
 if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
-  log "Running pg param normalizer unit tests"
+  log "Running patch unit tests (core)"
   pushd packages/core >/dev/null
   bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts || {
-    echo "pg patch unit tests FAILED -- refusing to ship this build" >&2
+    echo "core patch unit tests FAILED -- refusing to ship this build" >&2
+    exit 1
+  }
+  popd >/dev/null
+  log "Running patch unit tests (opencode: tool-argument salvage)"
+  pushd packages/opencode >/dev/null
+  bun test test/tool/tool-define.test.ts || {
+    echo "tool-argument salvage tests FAILED -- refusing to ship this build" >&2
     exit 1
   }
   popd >/dev/null
