@@ -169,3 +169,45 @@ ${message.recent}
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
 export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
   messages.flatMap((message) => toLLMMessage(message, model))
+
+/**
+ * Sent when a request would otherwise end on an assistant turn.
+ *
+ * Deliberately terse and instruction-free: it exists to satisfy a provider
+ * protocol requirement, not to steer the model. Anything more opinionated here
+ * would inject unrequested guidance into every affected step.
+ */
+export const CONTINUE_PROMPT = "Continue."
+
+/**
+ * Enforce the "conversation must end with a user message" provider invariant.
+ *
+ * Anthropic (and any provider that refuses assistant prefill) rejects a request
+ * whose message array ends on an assistant turn:
+ *
+ *   400 invalid_request_error - "This model does not support assistant message
+ *   prefill. The conversation must end with a user message."
+ *
+ * The agent loop reaches that state on its own. Every continuation step appends
+ * an assistant turn, and it is normally the *tool result* -- a separate
+ * non-assistant message -- that re-anchors the history. A step that emits text
+ * with NO tool call produces no tool result, so the next step dispatches a
+ * history ending on a bare assistant turn and the provider 400s, killing the
+ * run mid-task.
+ *
+ * This is applied once, at the point every request is assembled, rather than at
+ * the individual call sites that can produce the state. The pre-existing
+ * MAX_STEPS_PROMPT guard only covered the step-ceiling path, and only when an
+ * agent declared a `steps` limit -- so with no limit configured, nothing
+ * enforced the invariant at all.
+ *
+ * Trailing `system` messages are also unsafe terminators, so they are treated
+ * the same way. A history that is empty or already ends with a user/tool
+ * message is returned untouched.
+ */
+export const ensureTrailingUserMessage = (messages: readonly Message[]): readonly Message[] => {
+  const last = messages.at(-1)
+  if (last === undefined) return messages
+  if (last.role !== "assistant" && last.role !== "system") return messages
+  return [...messages, Message.user(CONTINUE_PROMPT)]
+}
