@@ -1,0 +1,12 @@
+[Unit]
+Description=opencode launch-shim integrity guard (restore on clobber)
+Documentation=https://github.com/OddballGreg/opencode
+
+[Service]
+Type=oneshot
+ExecStart=/home/gregory/.local/bin/opencode-shim-guard.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
