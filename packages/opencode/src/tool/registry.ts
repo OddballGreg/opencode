@@ -333,6 +333,7 @@ const layer = Layer.effect(
             jsonSchema,
             execute: tool.execute,
             formatValidationError: tool.formatValidationError,
+            repairArguments: tool.repairArguments,
           }
         }),
         { concurrency: "unbounded" },
