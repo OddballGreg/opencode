@@ -33,6 +33,50 @@ export class InvalidArgumentsError extends Schema.TaggedErrorClass<InvalidArgume
   }
 }
 
+/**
+ * Salvage a tool-call payload that is *nearly* schema-valid.
+ *
+ * Models routinely serialize a nested array/object argument as a JSON *string*
+ * instead of the structure itself, e.g. the `question` tool being handed
+ * `{"questions": "[{\"header\":...}]"}`. The schema then rejects it with
+ * `Expected array, got "[{...}]"`, the call is thrown away, and the model burns
+ * a whole round-trip re-emitting the same intent. The payload carried all the
+ * information needed -- only its encoding was wrong.
+ *
+ * So before surfacing InvalidArgumentsError, retry the decode once with any
+ * top-level string property that parses as JSON replaced by its parsed value.
+ *
+ * Deliberately conservative:
+ *  - only top-level properties of an object payload are considered;
+ *  - a string is only replaced when it parses AND yields an array or object,
+ *    so genuine string arguments (paths, patterns, prose) are never touched --
+ *    `JSON.parse` would reject them, and a bare `"42"`/`"true"` parses to a
+ *    scalar and is skipped;
+ *  - the parsed value is fed back through the SAME schema, so this widens the
+ *    accepted *encoding*, never the accepted shape. Anything still invalid
+ *    fails exactly as before.
+ */
+export const coerceJsonStringProperties = (args: unknown): unknown => {
+  if (args === null || typeof args !== "object" || Array.isArray(args)) return args
+  let changed = false
+  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) }
+  for (const [key, value] of Object.entries(out)) {
+    if (typeof value !== "string") continue
+    const trimmed = value.trim()
+    if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed !== null && typeof parsed === "object") {
+        out[key] = parsed
+        changed = true
+      }
+    } catch {
+      // Not JSON: leave the original string for the schema to judge.
+    }
+  }
+  return changed ? out : args
+}
+
 export type Context<M extends Metadata = Metadata> = {
   sessionID: SessionID
   messageID: MessageID
@@ -118,7 +162,14 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
         return Effect.gen(function* () {
+          // Decode strictly first; only a failure pays the salvage attempt, so
+          // the common (well-formed) path is unchanged.
           const decoded = yield* decode(args).pipe(
+            Effect.catch((error: unknown) => {
+              const coerced = coerceJsonStringProperties(args)
+              if (coerced === args) return Effect.fail(error)
+              return decode(coerced).pipe(Effect.mapError(() => error))
+            }),
             Effect.mapError(
               (error) =>
                 new InvalidArgumentsError({

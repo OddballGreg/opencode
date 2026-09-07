@@ -151,4 +151,143 @@ describe("Tool.define", () => {
       expect(args.message).toContain(`["questions"][0]["question"]`)
     }),
   )
+
+  // Models routinely serialize a nested argument as a JSON *string* rather than
+  // the structure itself (observed on the `question` tool:
+  // `{"questions": "[{\"header\":...}]"}` -> `Expected array, got "[{...}]"`).
+  // The payload carries the full intent, so rejecting it costs a pointless
+  // round-trip. The wrap retries once with such properties parsed.
+  const questionish = Schema.Struct({
+    questions: Schema.Array(Schema.Struct({ question: Schema.String, options: Schema.Array(Schema.String) })),
+  })
+
+  const defineCapturing = <P extends Schema.Struct<any>>(id: string, parameters: P, calls: unknown[]) =>
+    Effect.gen(function* () {
+      const info = yield* Tool.define(
+        id,
+        Effect.succeed({
+          description: "test tool",
+          parameters: parameters as any,
+          execute(args: unknown) {
+            calls.push(args)
+            return Effect.succeed({ title: "ok", output: "ok", metadata: { truncated: false } })
+          },
+        }),
+      )
+      const tool = yield* info.init()
+      return tool.execute as unknown as (args: unknown, ctx: Tool.Context) => ReturnType<typeof tool.execute>
+    })
+
+  it.effect("recovers a nested argument that the model sent as a JSON string", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineCapturing("qstring", questionish, calls)
+      const questions = [{ question: "Which first?", options: ["a", "b"] }]
+
+      const exit = yield* execute({ questions: JSON.stringify(questions) }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      // The tool receives the decoded structure, not the raw string.
+      expect(calls).toEqual([{ questions }])
+    }),
+  )
+
+  it.effect("leaves a well-formed payload untouched", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineCapturing("qplain", questionish, calls)
+      const questions = [{ question: "Which first?", options: ["a"] }]
+
+      const exit = yield* execute({ questions }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(calls).toEqual([{ questions }])
+    }),
+  )
+
+  it.effect("still reports the original schema error when parsing cannot save it", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineCapturing("qbad", questionish, calls)
+
+      // Parses fine as JSON, but the decoded shape is still missing `question`.
+      const exit = yield* execute({ questions: JSON.stringify([{ options: ["a"] }]) }, makeCtx()).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (!Exit.isFailure(exit)) return
+      const error = exit.cause.reasons.find(Cause.isDieReason)?.defect
+      expect(error).toBeInstanceOf(Tool.InvalidArgumentsError)
+      expect(calls).toEqual([])
+    }),
+  )
+
+  it.effect("does not mangle a genuine string argument", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const execute = yield* defineCapturing("qstr", Schema.Struct({ input: Schema.String }), calls)
+
+      // Strings that are not JSON objects/arrays must survive verbatim, even
+      // when they merely look structural.
+      for (const input of ["/some/path", "not json at all", "[unclosed", "{also unclosed"]) {
+        const exit = yield* execute({ input }, makeCtx()).pipe(Effect.exit)
+        expect(Exit.isSuccess(exit)).toBe(true)
+      }
+      expect(calls).toEqual([
+        { input: "/some/path" },
+        { input: "not json at all" },
+        { input: "[unclosed" },
+        { input: "{also unclosed" },
+      ])
+    }),
+  )
+})
+
+describe("Tool.coerceJsonStringProperties", () => {
+  const coerce = Tool.coerceJsonStringProperties
+
+  it.effect("parses JSON array and object strings", () =>
+    Effect.sync(() => {
+      expect(coerce({ a: "[1,2]" })).toEqual({ a: [1, 2] })
+      expect(coerce({ a: '{"k":"v"}' })).toEqual({ a: { k: "v" } })
+    }),
+  )
+
+  it.effect("returns the identical reference when nothing changed", () =>
+    Effect.sync(() => {
+      // Identity matters: the decode path uses `coerced === args` to decide
+      // whether a retry is even worth attempting.
+      const args = { a: "plain", b: 1 }
+      expect(coerce(args)).toBe(args)
+    }),
+  )
+
+  it.effect("skips scalars that happen to be valid JSON", () =>
+    Effect.sync(() => {
+      // "42" parses to a number, not a structure - replacing it could turn a
+      // legitimately-string argument into the wrong type.
+      const args = { a: "42", b: "true", c: "null", d: '"quoted"' }
+      expect(coerce(args)).toBe(args)
+    }),
+  )
+
+  it.effect("passes through non-object payloads", () =>
+    Effect.sync(() => {
+      expect(coerce(null)).toBeNull()
+      expect(coerce("string")).toBe("string")
+      expect(coerce([1, 2])).toEqual([1, 2])
+      expect(coerce(undefined)).toBeUndefined()
+    }),
+  )
+
+  it.effect("tolerates surrounding whitespace", () =>
+    Effect.sync(() => {
+      expect(coerce({ a: '  [{"x":1}]  ' })).toEqual({ a: [{ x: 1 }] })
+    }),
+  )
+
+  it.effect("only rewrites the offending property", () =>
+    Effect.sync(() => {
+      expect(coerce({ good: "keep me", bad: "[1]", n: 3 })).toEqual({ good: "keep me", bad: [1], n: 3 })
+    }),
+  )
 })
