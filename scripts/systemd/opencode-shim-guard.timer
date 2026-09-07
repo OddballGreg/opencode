@@ -1,0 +1,14 @@
+[Unit]
+Description=Check the opencode launch shim hourly (and shortly after login)
+
+[Timer]
+# The clobber vector is an installer run, which can happen at any time, so
+# check often. The guard is a single `cmp` when there is no drift, so the
+# no-op cost is negligible.
+OnBootSec=2min
+OnUnitActiveSec=1h
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
