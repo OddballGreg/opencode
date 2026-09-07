@@ -155,6 +155,13 @@ check_patch "text param NUL strip (textParam)"           2 "$PGDB" 'textParam'
 # MAX_STEPS_PROMPT must be a USER turn or Duo 400s on resume (prefill-400).
 check_patch "prefill-400 guard (MAX_STEPS_PROMPT as user)" 1 \
   "packages/core/src/session/runner/llm.ts" 'Message\.user\(MAX_STEPS_PROMPT\)'
+# Every request must end on a user message, else the provider rejects the
+# trailing assistant turn as prefill. Covers the tool-less-turn path that the
+# MAX_STEPS guard cannot reach when an agent declares no `steps` limit.
+check_patch "prefill-400 trailing-user invariant" 1 \
+  "packages/core/src/session/runner/to-llm-message.ts" 'ensureTrailingUserMessage'
+check_patch "prefill-400 invariant is applied to requests" 1 \
+  "packages/core/src/session/runner/llm.ts" 'ensureTrailingUserMessage\('
 if [[ "$durability_fail" == "1" ]]; then
   cat >&2 <<'EOF'
 
@@ -171,8 +178,8 @@ fi
 if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
   log "Running pg param normalizer unit tests"
   pushd packages/core >/dev/null
-  bun test test/pg-json-param.test.ts || {
-    echo "pg param normalizer tests FAILED -- refusing to ship this build" >&2
+  bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts || {
+    echo "pg patch unit tests FAILED -- refusing to ship this build" >&2
     exit 1
   }
   popd >/dev/null
