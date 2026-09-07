@@ -170,6 +170,13 @@ check_patch "tool repairArguments hook applied" 1 \
   "packages/opencode/src/tool/tool.ts" 'repairArguments'
 check_patch "question tool header backfill" 1 \
   "packages/opencode/src/tool/question.ts" 'repairArguments'
+# The shim guard restores ~/.opencode/bin/opencode after an installer clobbers
+# it (opencode's installer hardcodes INSTALL_DIR=$HOME/.opencode/bin). Its
+# canonical source must stay in the repo or there is nothing to restore FROM.
+check_patch "shim guard script present" 1 \
+  "scripts/opencode-shim-guard.sh" 'OPENCODE_SHIM_SOURCE'
+check_patch "canonical shim present" 1 \
+  "scripts/opencode-shim.sh" 'OPENCODE_BACKEND'
 if [[ "$durability_fail" == "1" ]]; then
   cat >&2 <<'EOF'
 
