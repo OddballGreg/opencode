@@ -162,6 +162,13 @@ check_patch "prefill-400 trailing-user invariant" 1 \
   "packages/core/src/session/runner/to-llm-message.ts" 'ensureTrailingUserMessage'
 check_patch "prefill-400 invariant is applied to requests" 1 \
   "packages/core/src/session/runner/llm.ts" 'ensureTrailingUserMessage\('
+# The two checks above only cover the V2 core runner. The V1 path is what
+# actually serves subagents today, and it has its own funnel -- so the V1 copy
+# is independently load-bearing. Losing it puts the 400 straight back.
+check_patch "prefill-400 trailing-user invariant (v1)" 1 \
+  "packages/opencode/src/session/llm/request.ts" 'export function ensureTrailingUserMessage'
+check_patch "prefill-400 invariant is applied to v1 requests" 1 \
+  "packages/opencode/src/session/llm/request.ts" 'const messages = ensureTrailingUserMessage\('
 # Tool-argument salvage: models send nested args as JSON strings, and omit the
 # question tool's `question` field. Both cost a discarded call + a re-ask.
 check_patch "tool arg JSON-string coercion" 1 \
@@ -198,10 +205,10 @@ if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
     exit 1
   }
   popd >/dev/null
-  log "Running patch unit tests (opencode: tool-argument salvage)"
+  log "Running patch unit tests (opencode: tool-argument salvage + v1 prefill guard)"
   pushd packages/opencode >/dev/null
-  bun test test/tool/tool-define.test.ts || {
-    echo "tool-argument salvage tests FAILED -- refusing to ship this build" >&2
+  bun test test/tool/tool-define.test.ts test/session/llm-prefill.test.ts || {
+    echo "opencode patch unit tests FAILED -- refusing to ship this build" >&2
     exit 1
   }
   popd >/dev/null
