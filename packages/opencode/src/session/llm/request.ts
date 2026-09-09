@@ -98,7 +98,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
-  const messages =
+  const messages = ensureTrailingUserMessage(
     isOpenaiOauth || input.isWorkflow
       ? input.messages
       : [
@@ -109,7 +109,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             }),
           ),
           ...input.messages,
-        ]
+        ],
+  )
 
   const params = yield* input.plugin.trigger(
     "chat.params",
@@ -221,6 +222,60 @@ export function hasToolCalls(messages: ModelMessage[]): boolean {
     }
   }
   return false
+}
+
+/**
+ * Sent when a request would otherwise end on an assistant turn.
+ *
+ * Deliberately terse and instruction-free: it exists to satisfy a provider
+ * protocol requirement, not to steer the model.
+ */
+export const CONTINUE_PROMPT = "Continue."
+
+/**
+ * Enforce the "conversation must end with a user message" provider invariant.
+ *
+ * Anthropic (and any provider that refuses assistant prefill) rejects a request
+ * whose message array ends on an assistant turn:
+ *
+ *   400 invalid_request_error - "This model does not support assistant message
+ *   prefill. The conversation must end with a user message."
+ *
+ * The agent loop reaches that state on its own. Every continuation step appends
+ * an assistant turn, and it is normally the *tool result* -- a separate
+ * non-assistant message -- that re-anchors the history. A step that emits text
+ * with NO tool call produces no tool result, so the next step dispatches a
+ * history ending on a bare assistant turn and the provider 400s, killing the
+ * run mid-task.
+ *
+ * This is the V1 counterpart of the identically-named guard in
+ * `@opencode-ai/core/session/runner/to-llm-message`. Both are load-bearing: the
+ * core one covers the V2 runner, this one covers `LLMRequestPrep.prepare`,
+ * which is the single funnel every V1 request (subagents included) passes
+ * through. Fixing only the core copy leaves the bug live on the V1 path.
+ *
+ * Trailing `system` messages are also unsafe terminators, so they are treated
+ * the same way. A history that is empty or already ends with a user/tool
+ * message is returned untouched.
+ *
+ * An assistant turn carrying no content is also left alone. Such turns are
+ * dropped before the wire (the Gemini transform strips an empty reasoning-only
+ * turn, for instance), so padding after one would inject a spurious "Continue."
+ * into a request that was never at risk.
+ */
+const isEmptyTurn = (message: ModelMessage): boolean => {
+  const content = message.content
+  if (typeof content === "string") return content.length === 0
+  if (!Array.isArray(content)) return false
+  return content.every((part) => (part.type === "text" || part.type === "reasoning") && part.text.length === 0)
+}
+
+export function ensureTrailingUserMessage(messages: ModelMessage[]): ModelMessage[] {
+  const last = messages.at(-1)
+  if (last === undefined) return messages
+  if (last.role !== "assistant" && last.role !== "system") return messages
+  if (isEmptyTurn(last)) return messages
+  return [...messages, { role: "user", content: CONTINUE_PROMPT }]
 }
 
 export * as LLMRequestPrep from "./request"
