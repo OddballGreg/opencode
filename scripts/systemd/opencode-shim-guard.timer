@@ -5,8 +5,21 @@ Description=Check the opencode launch shim hourly (and shortly after login)
 # The clobber vector is an installer run, which can happen at any time, so
 # check often. The guard is a single `cmp` when there is no drift, so the
 # no-op cost is negligible.
-OnBootSec=2min
-OnUnitActiveSec=1h
+#
+# WHY OnCalendar AND NOT OnBootSec+OnUnitActiveSec:
+#   The original monotonic-only pair silently stopped scheduling. OnBootSec is
+#   anchored to boot, so when the *user* manager restarts (re-login, systemd
+#   user instance respawn) long after boot, that deadline is already in the
+#   past and is treated as elapsed; OnUnitActiveSec then has no anchor because
+#   the service has not run under the new manager instance. The timer ends up
+#   `active (elapsed)` with `Trigger: n/a` and never fires again. Observed
+#   2026-09-10: last trigger 2026-09-08 16:50, ~42h with no clobber protection.
+#   OnCalendar is wall-clock anchored, so it always has a next elapse, and
+#   Persistent=true makes it catch up after downtime/suspend. OnStartupSec is
+#   relative to the manager start, which is the correct "shortly after login"
+#   trigger for a user unit.
+OnStartupSec=2min
+OnCalendar=hourly
 Persistent=true
 RandomizedDelaySec=60
 
