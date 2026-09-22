@@ -176,6 +176,33 @@ Keep autoupdate disabled so it can't overwrite the promoted fork binary.
 
 ## Known follow-ups / gaps
 
+- **BLOCKED: upstream v2.x is a divergent rewrite, not a rebase target.**
+  Upstream publishes two lines: the `v1.18.x` maintenance line (what this fork
+  tracks — it is the newest entry in the GitHub *releases* feed and the npm
+  dist-tag `latest`) and a fast-moving `v2.0.x` tag line that has **no** GitHub
+  Release objects at all (`releases/tags/v2.0.x` → HTTP 404). The two lines are
+  not ancestors of each other: their merge-base is `0e2dd4ad15` (2026-06-26) and
+  they are ~3.6k commits apart.
+  A probe rebase (`--onto v2.0.9`, run in a throwaway worktree) fails at commit
+  **2/45** — the `feat(database): dialect-aware schema` commit — with 10
+  conflicts, four of which are **modify/delete** because v2 removed files the
+  patch set edits:
+  `packages/core/src/control-plane/workspace.sql.ts`,
+  `packages/core/src/data-migration.sql.ts`,
+  `packages/core/src/flag/flag.ts`,
+  `packages/core/src/share/sql.ts`
+  (also gone: `packages/opencode/src/session/tools.ts`, which carries the
+  `tool.execute.before` short-circuit patch). v2 additionally moves to generated
+  `schema.gen.ts` / `migration.gen.ts` and adds `v1-migration.*`.
+  **Therefore:** moving the fork to v2 is a *port*, not a sync — do **not** run
+  `sync-pg-fork.sh --upstream v2.0.x` expecting it to succeed, and do not burn a
+  maintenance cycle re-probing it. It needs an explicit decision from Gregory
+  (stay on the v1.18 maintenance line vs. fund a v2 port of the dialect-aware
+  schema onto v2's generated-schema layout). Until then the fork stays on the
+  latest `feat/postgres-backend-v1.18.x` branch and this is the standing gap.
+  *(This note lives on the patch-source branch `feat/pg-to-sqlite-migrator` on
+  purpose: per-cycle branches are recreated by the rebase, so anything recorded
+  only on `feat/postgres-backend-v1.18.x` is silently dropped next cycle.)*
 - **SQLite→pg session delta.** The pg `opencode` db holds history migrated on
   2026-06-10 (13,260 sessions). Sessions created in stock SQLite since then are
   not yet in pg. Migrate with `script/migrate-sqlite-to-pg.ts` as a separate,
