@@ -13,6 +13,37 @@ if (SQLITE_OUT === LIVE_SQLITE_PATH) {
 }
 
 const TRUNCATE = process.argv.includes("--truncate")
+// Optional retention window (days). Unset = export everything (full reversible
+// migration). Set = export only sessions with time_updated >= now - N days plus
+// their dependent rows, and prune bridge rows that fell out of the window.
+const SINCE_DAYS = process.env.SQLITE_SINCE_DAYS ? Number(process.env.SQLITE_SINCE_DAYS) : undefined
+if (SINCE_DAYS !== undefined && (!Number.isFinite(SINCE_DAYS) || SINCE_DAYS <= 0)) {
+  console.error(`FATAL: SQLITE_SINCE_DAYS must be a positive number, got ${process.env.SQLITE_SINCE_DAYS}`)
+  process.exit(2)
+}
+const CUTOFF = SINCE_DAYS === undefined ? undefined : Date.now() - Math.round(SINCE_DAYS * 86_400_000)
+const WINDOW_SESSIONS = `SELECT id FROM "session" WHERE time_updated >= ${CUTOFF}`
+// event_sequence/event aggregates keyed by a session id follow that session;
+// non-session aggregates (evt_*, singletons) are always kept.
+const WINDOW_AGGREGATES = `aggregate_id IN (${WINDOW_SESSIONS}) OR aggregate_id NOT LIKE 'ses\\_%' ESCAPE '\\'`
+// Per-table WHERE clause in windowed mode. Tables not listed (project, account,
+// workspace, ...) are small parents and are always exported in full so FKs hold.
+const WINDOW_FILTER: Record<string, string> = {
+  session: `time_updated >= ${CUTOFF}`,
+  message: `session_id IN (${WINDOW_SESSIONS})`,
+  part: `message_id IN (SELECT id FROM "message" WHERE session_id IN (${WINDOW_SESSIONS}))`,
+  todo: `session_id IN (${WINDOW_SESSIONS})`,
+  event_sequence: WINDOW_AGGREGATES,
+  event: WINDOW_AGGREGATES,
+  session_message: `session_id IN (${WINDOW_SESSIONS})`,
+  session_input: `session_id IN (${WINDOW_SESSIONS})`,
+  session_context_epoch: `session_id IN (${WINDOW_SESSIONS})`,
+  session_share: `session_id IN (${WINDOW_SESSIONS})`,
+}
+function whereOf(table: string) {
+  if (CUTOFF === undefined || !WINDOW_FILTER[table]) return ""
+  return ` WHERE ${WINDOW_FILTER[table]}`
+}
 // read batch size: how many rows to pull from pg per loop
 const READ_BATCH = 4000
 
@@ -65,8 +96,12 @@ function isBool(table: string, col: string) {
   return BOOLEAN[table]?.has(col) ?? false
 }
 
-function ensureSchema(path: string) {
+async function ensureSchema(path: string) {
+  const fresh = !(await Bun.file(path).exists())
   const db = new Database(path)
+  // auto_vacuum can only be chosen before the first table exists, so set it on
+  // brand-new files; pruned pages can then be reclaimed with incremental_vacuum.
+  if (fresh) db.run("PRAGMA auto_vacuum = INCREMENTAL; VACUUM")
   const tables = db.query(`SELECT name FROM sqlite_master WHERE type='table' AND name='session'`).all()
   db.close()
   if (tables.length > 0) return
@@ -124,7 +159,7 @@ function normalizeInt(val: unknown): unknown {
 }
 
 async function pgCount(table: string): Promise<number> {
-  const r = (await pg.unsafe(`SELECT count(*)::bigint AS n FROM "${table}"`)) as Array<{ n: string | number }>
+  const r = (await pg.unsafe(`SELECT count(*)::bigint AS n FROM "${table}"${whereOf(table)}`)) as Array<{ n: string | number }>
   return Number(r[0].n)
 }
 
@@ -140,6 +175,66 @@ function truncateAll(sqlite: Database) {
     sqlite.run(`DELETE FROM "${table}"`)
   }
   sqlite.run("PRAGMA foreign_keys = ON")
+}
+
+// Tables whose rows belong to a session, in FK-safe insert order (children
+// after parents); pruning walks this in reverse.
+const SESSION_SCOPED: Record<string, string> = {
+  session: "id",
+  message: "session_id",
+  part: "session_id",
+  todo: "session_id",
+  event_sequence: "aggregate_id",
+  event: "aggregate_id",
+  session_message: "session_id",
+  session_input: "session_id",
+  session_context_epoch: "session_id",
+  session_share: "session_id",
+}
+
+// Delete bridge rows for sessions outside pg's current window. Membership comes
+// from pg, not the bridge's own time_updated: INSERT OR IGNORE never refreshes
+// existing rows, so a bridge session row can look stale while pg says it is live.
+async function pruneOutOfWindow(sqlite: Database) {
+  const keep = (await pg.unsafe(WINDOW_SESSIONS)) as Array<{ id: string }>
+  if (keep.length === 0) {
+    console.log(`[prune] pg window returned 0 sessions; skipping prune to avoid wiping the bridge`)
+    return
+  }
+  sqlite.run(`CREATE TEMP TABLE IF NOT EXISTS keep_session (id TEXT PRIMARY KEY)`)
+  sqlite.run(`DELETE FROM keep_session`)
+  const add = sqlite.prepare(`INSERT OR IGNORE INTO keep_session (id) VALUES (?)`)
+  sqlite.transaction(() => keep.forEach((r) => add.run(r.id)))()
+
+  const deleted: Record<string, number> = {}
+  sqlite.run("PRAGMA foreign_keys = OFF")
+  sqlite.transaction(() => {
+    for (const table of [...TABLES].reverse().filter((t) => SESSION_SCOPED[t])) {
+      const col = SESSION_SCOPED[table]
+      const scope = col === "aggregate_id" ? ` AND aggregate_id LIKE 'ses\\_%' ESCAPE '\\'` : ""
+      deleted[table] = sqlite.run(
+        `DELETE FROM "${table}" WHERE "${col}" NOT IN (SELECT id FROM keep_session)${scope}`,
+      ).changes
+    }
+    // orphan parts (message pruned under another session_id, or left by live drift
+    // in a previous run); any still-live ones are re-copied by this run's export
+    deleted.orphan_part = sqlite.run(`DELETE FROM "part" WHERE message_id NOT IN (SELECT id FROM "message")`).changes
+  })()
+  sqlite.run("PRAGMA foreign_keys = ON")
+  console.log(`[prune] kept ${keep.length} window sessions; deleted ${JSON.stringify(deleted)}`)
+
+  const autoVacuum = (sqlite.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum
+  const freelist = () => (sqlite.query("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count
+  const pageSize = (sqlite.query("PRAGMA page_size").get() as { page_size: number }).page_size
+  const before = freelist()
+  if (autoVacuum === 2) {
+    sqlite.run("PRAGMA incremental_vacuum")
+    console.log(`[prune] incremental_vacuum reclaimed ${before - freelist()} pages (${((before * pageSize) / 1e6).toFixed(1)} MB)`)
+    return
+  }
+  console.log(
+    `[prune] auto_vacuum=${autoVacuum} (not incremental); freelist=${before} pages (${((before * pageSize) / 1e6).toFixed(1)} MB) reusable, not vacuuming`,
+  )
 }
 
 type Anomaly = { table: string; id: string; column: string; reason: string }
@@ -158,7 +253,7 @@ async function migrateTable(sqlite: Database, table: string): Promise<{ copied: 
   let offset = 0
   while (true) {
     const batchRows = (await pg.unsafe(
-      `SELECT ${colList} FROM "${table}" ORDER BY ${cols[0]} LIMIT ${READ_BATCH} OFFSET ${offset}`,
+      `SELECT ${colList} FROM "${table}"${whereOf(table)} ORDER BY ${cols[0]} LIMIT ${READ_BATCH} OFFSET ${offset}`,
     )) as Array<Record<string, unknown>>
     if (batchRows.length === 0) break
     offset += READ_BATCH
@@ -205,15 +300,22 @@ async function main() {
   const start = Date.now()
   console.log(`Source : ${PG_URL} (read-only, never written)`)
   console.log(`Target : ${SQLITE_OUT}`)
-  console.log(`Mode   : ${TRUNCATE ? "--truncate (clean load)" : "INSERT OR IGNORE (re-runnable)"}`)
+  console.log(`Mode   : ${TRUNCATE ? "--truncate (clean load)" : "INSERT OR IGNORE (re-runnable)"}${CUTOFF === undefined ? "" : ", windowed + prune"}`)
+  if (CUTOFF !== undefined) {
+    const total = (await pg.unsafe(`SELECT count(*)::bigint AS n FROM "session"`)) as Array<{ n: string }>
+    console.log(
+      `Window : SQLITE_SINCE_DAYS=${SINCE_DAYS} cutoff=${new Date(CUTOFF).toISOString()} -> ${await pgCount("session")} of ${Number(total[0]?.n)} pg sessions in window`,
+    )
+  }
   console.log("")
 
-  ensureSchema(SQLITE_OUT)
+  await ensureSchema(SQLITE_OUT)
   const sqlite = new Database(SQLITE_OUT)
   sqlite.run("PRAGMA journal_mode = WAL")
   sqlite.run("PRAGMA foreign_keys = ON")
 
   if (TRUNCATE) truncateAll(sqlite)
+  if (!TRUNCATE && CUTOFF !== undefined) await pruneOutOfWindow(sqlite)
 
   sqlite.run("PRAGMA foreign_keys = OFF")
   const perTable: Record<string, { copied: number; skipped: number }> = {}
