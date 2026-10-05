@@ -10,7 +10,16 @@
 # This bridge periodically exports the Postgres store into a DEDICATED SQLite
 # file that memory watches instead (config [ingestion] watch_paths). Because the
 # reverse migrator is re-runnable (INSERT OR IGNORE) and the ingester polls by
-# `since`, refreshing this file keeps memory current with zero churn.
+# `since`, refreshing this file keeps memory current.
+#
+# Retention window: the export is limited to sessions updated in the last
+# OPENCODE_BRIDGE_SINCE_DAYS days (default 14) via SQLITE_SINCE_DAYS, and the
+# migrator prunes bridge rows that fell out of that window on every run. Without
+# it, every hourly run re-exported ALL of pg (~59k sessions) while
+# opencode-memory's daily prune deleted everything older than 14 days, so ~47k
+# sessions came straight back each hour and the file swung 6G <-> 31G daily
+# (its 31G backups + VACUUM temp rewrites filled the disk on 2026-10-01/05).
+# The window must stay >= memory's own retention so memory never misses rows.
 #
 # This is the interim fix for ghavenga/opencode-memory#116 (native pg ingestion).
 # It is READ-ONLY on Postgres and never touches the live/original SQLite db.
@@ -42,8 +51,9 @@ if ! flock -n 9; then
   exit 0
 fi
 
+SINCE_DAYS="${OPENCODE_BRIDGE_SINCE_DAYS:-14}"
 start=$(date +%s)
-log "bridge export start -> $BRIDGE_DB"
+log "bridge export start -> $BRIDGE_DB (window ${SINCE_DAYS}d)"
 # Re-runnable incremental refresh (no --truncate): only adds new rows.
 # The reverse migrator exits non-zero on ANY count mismatch, but for the bridge
 # a small mismatch is EXPECTED and harmless: (a) a handful of Postgres-incompatible
@@ -53,21 +63,23 @@ log "bridge export start -> $BRIDGE_DB"
 # the next refresh catches up. We therefore do NOT treat the migrator's exit code as
 # fatal; instead we validate the bridge is USABLE: the session spine must match within
 # a drift tolerance, and the file must be a valid sqlite db with the expected tables.
-( cd "$REPO" && SQLITE_OUT="$BRIDGE_DB" OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" \
+( cd "$REPO" && SQLITE_OUT="$BRIDGE_DB" SQLITE_SINCE_DAYS="$SINCE_DAYS" OPENCODE_DATABASE_URL="$OPENCODE_DATABASE_URL" \
     "$BUN" run script/migrate-pg-to-sqlite.ts >> "$LOG" 2>&1 ) || log "migrator exited non-zero (expected under drift/oversize skips; validating usability instead)"
 
 # Usability check: bridge db opens, has a session table, and session count is
-# within DRIFT_TOL of pg (spine parity). This catches a genuinely broken export
-# while tolerating live-drift / oversize-skip mismatches.
+# within DRIFT_TOL of pg's WINDOWED session count (same time_updated predicate the
+# migrator uses), so spine parity is judged against what was meant to be exported.
+# This catches a genuinely broken export while tolerating live-drift / oversize-skip
+# mismatches (and the few minutes the cutoff moves between export and this check).
 DRIFT_TOL="${OPENCODE_BRIDGE_DRIFT_TOL:-200}"
 bridge_sessions=$(sqlite3 "$BRIDGE_DB" "SELECT count(*) FROM session;" 2>/dev/null || echo -1)
-pg_sessions=$(docker exec "${OPENCODE_PG_CONTAINER:-opencode-pg}" psql -U opencode -d "${OPENCODE_DATABASE_URL##*/}" -tAc "SELECT count(*) FROM session;" 2>/dev/null | tr -d ' ' || echo -2)
+pg_sessions=$(docker exec "${OPENCODE_PG_CONTAINER:-opencode-pg}" psql -U opencode -d "${OPENCODE_DATABASE_URL##*/}" -tAc "SELECT count(*) FROM session WHERE time_updated >= (extract(epoch FROM now()) * 1000)::bigint - ${SINCE_DAYS}::numeric * 86400000;" 2>/dev/null | tr -d ' ' || echo -2)
 diff=$(( pg_sessions - bridge_sessions )); [ "$diff" -lt 0 ] && diff=$(( -diff ))
 dur=$(( $(date +%s) - start ))
 if [ "$bridge_sessions" -gt 0 ] && [ "$diff" -le "$DRIFT_TOL" ]; then
-  log "bridge export OK in ${dur}s (bridge sessions=$bridge_sessions, pg=$pg_sessions, drift=$diff <= $DRIFT_TOL)"
+  log "bridge export OK in ${dur}s (bridge sessions=$bridge_sessions, pg_window=$pg_sessions, drift=$diff <= $DRIFT_TOL)"
 else
-  log "bridge export UNUSABLE (bridge sessions=$bridge_sessions, pg=$pg_sessions, drift=$diff > $DRIFT_TOL)"
+  log "bridge export UNUSABLE (bridge sessions=$bridge_sessions, pg_window=$pg_sessions, drift=$diff > $DRIFT_TOL)"
   exit 1
 fi
 
