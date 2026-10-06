@@ -4,6 +4,11 @@ import { sql } from "drizzle-orm"
 import { Effect, Semaphore } from "effect"
 import type { PgEffectDb } from "./pg-effect-db"
 import initSql from "./migration-pg/0001_init.sql" with { type: "text" }
+// `credential` was declared with `sqliteTable` instead of the dialect-aware
+// `table`, so drizzle-kit left it out of 0001_init and every pg database was
+// missing it ('relation "credential" does not exist'). 0001_init now includes
+// it for fresh databases; this IF NOT EXISTS migration backfills existing ones.
+import credentialSql from "./migration-pg/0002_credential.sql" with { type: "text" }
 
 type Database = PgEffectDb.PgEffectRawDatabase
 type Transaction = PgEffectDb.PgEffectRawTransaction
@@ -14,7 +19,10 @@ const lock = Semaphore.makeUnsafe(1)
 // dialect-aware Drizzle schema, rather than replaying the 32 SQLite-flavoured
 // TypeScript migrations (which contain SQLite-specific DDL). New columns added
 // later should append a new numbered .sql file here and to the list below.
-const pgMigrations: { id: string; sql: string }[] = [{ id: "0001_init", sql: initSql }]
+const pgMigrations: { id: string; sql: string }[] = [
+  { id: "0001_init", sql: initSql },
+  { id: "0002_credential", sql: credentialSql },
+]
 
 export function apply(db: Database) {
   return lock.withPermit(applyOnly(db, pgMigrations))
