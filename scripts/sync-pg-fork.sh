@@ -184,6 +184,18 @@ check_patch "shim guard script present" 1 \
   "scripts/opencode-shim-guard.sh" 'OPENCODE_SHIM_SOURCE'
 check_patch "canonical shim present" 1 \
   "scripts/opencode-shim.sh" 'OPENCODE_BACKEND'
+# Bun's idleTimeout kills a transaction's reserved connection under host
+# contention ("Idle timeout reached ... query: COMMIT"); PgRetry replays it.
+check_patch "pg transaction retry wired into every transaction" 1 \
+  "$PGDB" 'PgRetry\.retryTransaction\('
+check_patch "pg driver errors classified for retry" 1 \
+  "packages/core/src/database/pg.bun.ts" 'PgRetry\.toSqlError\('
+check_patch "pg idleTimeout no longer hardcoded to 20s" 1 \
+  "packages/core/src/database/pg.bun.ts" 'OPENCODE_DB_IDLE_TIMEOUT'
+check_patch "pg bounded close (untimed close hangs after dead conn)" 1 \
+  "packages/core/src/database/pg.bun.ts" 'native\.close\(\{ timeout'
+check_patch "durable event ambiguous-COMMIT reconcile" 1 \
+  "packages/core/src/event.ts" 'PgRetry\.isCommitOutcomeUnknown\('
 if [[ "$durability_fail" == "1" ]]; then
   cat >&2 <<'EOF'
 
@@ -200,7 +212,8 @@ fi
 if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
   log "Running patch unit tests (core)"
   pushd packages/core >/dev/null
-  bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts || {
+  bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts test/pg-retry.test.ts \
+    test/event-commit-unknown.test.ts || {
     echo "core patch unit tests FAILED -- refusing to ship this build" >&2
     exit 1
   }
