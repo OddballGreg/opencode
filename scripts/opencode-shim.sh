@@ -19,6 +19,10 @@
 #   opencode --postgres [args...]   -> force pg explicitly (same as default)
 #   opencode --which                -> print which backend/binary would run, then exit
 #   OPENCODE_BACKEND=stock opencode ...      -> env override to force SQLite
+#   OPENCODE_PG_BIN=opencode-pg.next opencode ... -> run a specific fork build
+#       (name beside this shim, or absolute path). Put it in
+#       ~/.config/opencode-pg/env to switch every launch, including bg workers;
+#       delete the line to roll back. A missing target falls back to opencode-pg.
 #
 # Default flipped stock->postgres 2026-08-14 after the cutover + fixes proved
 # stable (event-write FOR UPDATE lock landed; 1-month health review reminder set).
@@ -65,11 +69,6 @@ for a in "$@"; do
 done
 
 if [ "$backend" = "postgres" ]; then
-  TARGET="$PG"
-  if [ ! -x "$TARGET" ]; then
-    echo "opencode(shim): pg backend requested but $TARGET is missing/not executable." >&2
-    exit 127
-  fi
   if [ -f "$PG_ENV" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -77,6 +76,24 @@ if [ "$backend" = "postgres" ]; then
     set +a
   else
     echo "opencode(shim): warning: $PG_ENV not found; pg binary will fall back to its channel SQLite db." >&2
+  fi
+  # Build selector: OPENCODE_PG_BIN picks which fork build runs, so a new build
+  # can be trialled (or rolled back) by one line in $PG_ENV, with no binary
+  # renames. A bare name resolves beside this shim; an absolute path is used
+  # as-is. Unset means the default opencode-pg.
+  case "${OPENCODE_PG_BIN:-}" in
+    "") TARGET="$PG" ;;
+    /*) TARGET="$OPENCODE_PG_BIN" ;;
+    *) TARGET="$BIN_DIR/$OPENCODE_PG_BIN" ;;
+  esac
+  if [ ! -x "$TARGET" ]; then
+    if [ "$TARGET" != "$PG" ] && [ -x "$PG" ]; then
+      echo "opencode(shim): warning: OPENCODE_PG_BIN=$OPENCODE_PG_BIN is missing/not executable; falling back to $PG." >&2
+      TARGET="$PG"
+    else
+      echo "opencode(shim): pg backend requested but $TARGET is missing/not executable." >&2
+      exit 127
+    fi
   fi
 else
   TARGET="$STOCK"
@@ -94,6 +111,28 @@ if [ "$show_which" = "1" ]; then
   echo "version: $("$TARGET" --version 2>/dev/null || echo '?')"
   [ "$backend" = "postgres" ] && echo "pg_env:  $PG_ENV"
   exit 0
+fi
+
+# Herdr integration. Herdr detects agents by process name, and the real binary
+# is opencode-pg/opencode-stock, so tell it explicitly. Non-TUI subcommands
+# (run/serve/web) launched from inside a herdr pane must NOT inherit the pane
+# identity, or their herdr plugin reports would overwrite the pane's state.
+if [ "${HERDR_ENV:-}" = "1" ]; then
+  sub=""
+  for a in "$@"; do
+    case "$a" in
+      -*) continue ;;
+      *) sub="$a"; break ;;
+    esac
+  done
+  case "$sub" in
+    run|serve|web)
+      unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_AGENT
+      ;;
+    *)
+      export HERDR_AGENT=opencode
+      ;;
+  esac
 fi
 
 exec "$TARGET" "$@"
