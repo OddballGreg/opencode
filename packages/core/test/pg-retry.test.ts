@@ -56,6 +56,19 @@ describe("PgRetry.isRetryable / isCommitOutcomeUnknown", () => {
     expect(PgRetry.isRetryable(Cause.die(wrapped))).toBe(true)
   })
 
+  test("event_sequence upsert on a dead reserved connection (production shape) is retryable", () => {
+    const query = `insert into event_sequence (aggregate_id, seq) values ($1, -1)
+                                    on conflict (aggregate_id) do update set seq = event_sequence.seq`
+    const sqlError = PgRetry.toSqlError(new Error("connection must be a PostgresSQLConnection"), query, "m")
+    const drizzle = Object.assign(new Error(`Failed query: ${query}\nparams: ses_x`), {
+      name: "EffectDrizzleQueryError",
+      cause: Cause.fail(sqlError),
+    })
+    expect(PgRetry.isRetryable(Cause.die(drizzle))).toBe(true)
+    const rollback = PgRetry.toSqlError(new Error("connection must be a PostgresSQLConnection"), "ROLLBACK", "m")
+    expect(PgRetry.isRetryable(Cause.die(rollback))).toBe(true)
+  })
+
   test("fatal and ambiguous-commit errors are not retryable", () => {
     const fatal = PgRetry.toSqlError(pgError("X", "duplicate", "23505"), "insert", "m")
     expect(PgRetry.isRetryable(Cause.die(fatal))).toBe(false)
