@@ -196,6 +196,20 @@ check_patch "pg bounded close (untimed close hangs after dead conn)" 1 \
   "packages/core/src/database/pg.bun.ts" 'native\.close\(\{ timeout'
 check_patch "durable event ambiguous-COMMIT reconcile" 1 \
   "packages/core/src/event.ts" 'PgRetry\.isCommitOutcomeUnknown\('
+# A schema file that uses sqliteTable directly is invisible to the pg
+# generator, so its table silently goes missing from 0001_init (credential did).
+check_patch "credential table is dialect-aware" 1 \
+  "packages/core/src/credential/sql.ts" 'table\("credential"'
+check_patch "pg credential backfill migration registered" 1 \
+  "packages/core/src/database/migration.pg.ts" '0002_credential'
+stray_sqlite="$(grep -rlE 'sqliteTable\(' packages/core/src --include='*.ts' | grep -v 'schema-dialect\.ts' || true)"
+if [[ -n "$stray_sqlite" ]]; then
+  echo "   MISSING: dialect-aware table() (sqliteTable used directly; pg will lack the table) in:" >&2
+  echo "$stray_sqlite" | sed 's/^/     /' >&2
+  durability_fail=1
+else
+  echo "   ok: no schema file bypasses the dialect-aware table()"
+fi
 if [[ "$durability_fail" == "1" ]]; then
   cat >&2 <<'EOF'
 
