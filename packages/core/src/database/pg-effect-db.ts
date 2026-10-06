@@ -38,6 +38,7 @@ import { EffectLogger } from "drizzle-orm/effect-core"
 // Type-only: the stock concrete db type, used purely to mirror its method
 // signatures in the wrapper interface. Type imports never load `driver.js`.
 import type { EffectPgDatabase } from "drizzle-orm/effect-postgres"
+import { PgRetry } from "./pg-retry"
 
 type RawQuery = SQL | SQLWrapper | string
 
@@ -278,8 +279,13 @@ function makeRaw(db: { execute: (q: any) => any }) {
 export function wrap(db: EffectPgDatabase): PgEffectRawDatabase {
   const raw = makeRaw(db)
 
+  // Every top-level pg transaction is replayed on a fresh connection when it
+  // fails transiently (idle-timeout-killed connection, serialization failure,
+  // deadlock, reserve failure). See `pg-retry.ts` for what is / isn't safe.
   const transaction: PgEffectRawDatabase["transaction"] = ((fn: any, ...rest: any[]) =>
-    (db.transaction as any)((tx: any) => fn(wrapTransaction(tx)), ...rest)) as PgEffectRawDatabase["transaction"]
+    PgRetry.retryTransaction(
+      Effect.suspend(() => (db.transaction as any)((tx: any) => fn(wrapTransaction(tx)), ...rest)),
+    )) as PgEffectRawDatabase["transaction"]
 
   return {
     ...raw,
