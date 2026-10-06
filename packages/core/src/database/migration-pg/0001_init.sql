@@ -43,6 +43,18 @@ CREATE TABLE "control_account" (
 	CONSTRAINT "control_account_pkey" PRIMARY KEY("email","url")
 );
 --> statement-breakpoint
+CREATE TABLE "credential" (
+	"id" text PRIMARY KEY,
+	"integration_id" text,
+	"label" text NOT NULL,
+	"value" jsonb NOT NULL,
+	"connector_id" text,
+	"method_id" text,
+	"active" boolean,
+	"time_created" bigint NOT NULL,
+	"time_updated" bigint NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "event_sequence" (
 	"aggregate_id" text PRIMARY KEY,
 	"seq" bigint NOT NULL,
