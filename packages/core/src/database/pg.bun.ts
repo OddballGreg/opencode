@@ -8,9 +8,10 @@ import * as Stream from "effect/Stream"
 import * as Reactivity from "effect/unstable/reactivity/Reactivity"
 import * as Client from "effect/unstable/sql/SqlClient"
 import type { Connection } from "effect/unstable/sql/SqlConnection"
-import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
+import { ConnectionError, SqlError } from "effect/unstable/sql/SqlError"
 import * as Statement from "effect/unstable/sql/Statement"
 import { Pg } from "./pg"
+import { PgRetry } from "./pg-retry"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
 
@@ -31,8 +32,26 @@ interface Config {
   readonly transformQueryNames?: (str: string) => string
 }
 
-const classifyPgError = (cause: unknown, message: string) =>
-  new SqlError({ reason: new UnknownError({ cause, message, operation: "execute" }) })
+const classifyPgError = (cause: unknown, query: string, message: string, operation?: string) =>
+  PgRetry.toSqlError(cause, query, message, operation)
+
+const envSeconds = (name: string, fallback: number) => {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+const LONG_TRANSACTION_MS = envSeconds("OPENCODE_DB_LONG_TX_WARN", 10) * 1000
+
+// Releasing a reserved connection that Bun already closed (idle timeout,
+// server drop) rejects asynchronously with "Connection closed". Nothing
+// awaits it, so it would surface as an unhandled rejection; swallow it — the
+// pool replaces dead connections on its own.
+const releaseQuietly = (reserved: ReservedSQL) => {
+  try {
+    const result = reserved.release() as unknown
+    if (result && typeof (result as Promise<unknown>).catch === "function") (result as Promise<unknown>).catch(() => {})
+  } catch {}
+}
 
 /**
  * Build a diagnostic error message for a failed `db.unsafe(query, params)`.
@@ -128,7 +147,7 @@ const make = (options: Config) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
           try: () => db.unsafe(query, params as any[]) as unknown as Promise<Array<Record<string, unknown>>>,
-          catch: (cause) => classifyPgError(cause, executeErrorMessage(query, params, cause)),
+          catch: (cause) => classifyPgError(cause, query, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<Record<string, unknown>>))
 
     const runValuesOn =
@@ -136,7 +155,7 @@ const make = (options: Config) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
           try: () => db.unsafe(query, params as any[]).values() as unknown as Promise<Array<unknown[]>>,
-          catch: (cause) => classifyPgError(cause, executeErrorMessage(query, params, cause)),
+          catch: (cause) => classifyPgError(cause, query, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<unknown[]>))
 
     const connectionFor = (db: SQL): PgConnection => {
@@ -169,13 +188,26 @@ const make = (options: Config) =>
     // connection. Bun.sql exposes `.reserve()` to pull a connection out of the
     // pool; the reserved connection is released when the surrounding scope
     // closes (after COMMIT/ROLLBACK issued by the SqlClient transaction logic).
+    // A reserve failure means no statement ran, so it is always retryable.
     const transactionAcquirer = Effect.acquireRelease(
       Effect.tryPromise({
         try: () => native.reserve(),
-        catch: (cause) => classifyPgError(cause, "Failed to reserve connection"),
-      }),
-      (reserved) => Effect.sync(() => reserved.release()),
-    ).pipe(Effect.map((reserved: ReservedSQL) => connectionFor(reserved as unknown as SQL)))
+        catch: (cause) =>
+          new SqlError({
+            reason: new ConnectionError({ cause, message: "Failed to reserve connection", operation: "reserve" }),
+          }),
+      }).pipe(Effect.map((reserved) => ({ reserved, start: Date.now() }))),
+      ({ reserved, start }) =>
+        Effect.gen(function* () {
+          releaseQuietly(reserved)
+          const elapsed = Date.now() - start
+          if (LONG_TRANSACTION_MS > 0 && elapsed > LONG_TRANSACTION_MS) {
+            yield* Effect.logWarning("pg transaction held a reserved connection for a long time").pipe(
+              Effect.annotateLogs({ elapsedMs: elapsed }),
+            )
+          }
+        }),
+    ).pipe(Effect.map(({ reserved }) => connectionFor(reserved as unknown as SQL)))
 
     const client = Object.assign(
       (yield* Client.make({
@@ -211,13 +243,25 @@ const nativeLayer = (config: Config) =>
       //    not be so large that N processes exhaust server max_connections.
       // We use a moderate pool (8) and rely on a raised server max_connections
       // (500 on the dedicated local instance) for headroom (~60 processes).
+      //
+      // idleTimeout: Bun closes a connection after this many seconds without
+      // traffic — including a connection reserved for an open transaction.
+      // At 20s, a host-contended process could stall mid-transaction long
+      // enough for Bun to kill it, failing the COMMIT with
+      // ERR_POSTGRES_IDLE_TIMEOUT. 300s keeps that rare (and PgRetry replays
+      // the transaction when it does happen). maxLifetime stays off by
+      // default: a lifetime close can also land mid-transaction.
       const native = new SQL({
         url: config.url,
         max: config.maxConnections ?? Number(process.env.OPENCODE_DB_POOL_MAX ?? 8),
-        idleTimeout: 20,
+        idleTimeout: envSeconds("OPENCODE_DB_IDLE_TIMEOUT", 300),
+        maxLifetime: envSeconds("OPENCODE_DB_MAX_LIFETIME", 0),
         connectionTimeout: 30,
       })
-      yield* Effect.addFinalizer(() => Effect.promise(() => native.close()))
+      // Bounded close: Bun 1.3.x's untimed close() never resolves once a
+      // reserved connection has been killed (e.g. by idleTimeout), which would
+      // hang shutdown. The timeout still lets in-flight queries drain first.
+      yield* Effect.addFinalizer(() => Effect.promise(() => native.close({ timeout: 5 }).catch(() => {})))
       return native
     }),
   )
