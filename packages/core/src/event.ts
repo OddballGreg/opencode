@@ -11,6 +11,7 @@ import { Location } from "./location"
 import { makeGlobalNode } from "./effect/app-node"
 import { isDeepStrictEqual } from "node:util"
 import { Durable } from "@opencode-ai/schema/durable-event-manifest"
+import { PgRetry } from "./database/pg-retry"
 
 export const ID = Event.ID
 export type ID = import("@opencode-ai/schema/event").ID
@@ -375,7 +376,53 @@ export const layerWith = (options?: LayerOptions) =>
                         }),
                       { behavior: "immediate" },
                     )
-                    .pipe(Effect.orDie)
+                    .pipe(
+                      // Postgres only: the connection dropped while COMMIT was in
+                      // flight, so we cannot know whether it landed. PgRetry never
+                      // blindly replays that (it could double-apply), but a durable
+                      // event is uniquely identified by its id, so we can check:
+                      // stored + identical -> it committed; absent -> it did not,
+                      // replay once; stored but different -> genuine divergence.
+                      (attempt) =>
+                        attempt.pipe(
+                          Effect.catchCause((cause) =>
+                            !PgRetry.isCommitOutcomeUnknown(cause)
+                              ? Effect.failCause(cause)
+                              : Effect.gen(function* () {
+                                  const stored = yield* db
+                                    .select({
+                                      aggregateID: EventTable.aggregate_id,
+                                      seq: EventTable.seq,
+                                      type: EventTable.type,
+                                      data: EventTable.data,
+                                    })
+                                    .from(EventTable)
+                                    .where(eq(EventTable.id, event.id))
+                                    .get()
+                                  if (!stored) {
+                                    yield* Effect.logWarning(
+                                      "pg COMMIT outcome unknown; event not stored, replaying transaction",
+                                    ).pipe(Effect.annotateLogs({ eventID: event.id, aggregateID }))
+                                    return yield* attempt
+                                  }
+                                  const encoded = Schema.encodeUnknownSync(definition.data)(event.data)
+                                  if (
+                                    stored.aggregateID === aggregateID &&
+                                    stored.type === versionedType(definition.type, durable.version) &&
+                                    isDeepStrictEqual(stored.data, encoded) &&
+                                    (!input || input.seq === stored.seq)
+                                  ) {
+                                    yield* Effect.logWarning(
+                                      "pg COMMIT outcome unknown; event found committed, treating as success",
+                                    ).pipe(Effect.annotateLogs({ eventID: event.id, aggregateID, seq: stored.seq }))
+                                    return { aggregateID, seq: stored.seq }
+                                  }
+                                  return yield* Effect.failCause(cause)
+                                }),
+                          ),
+                        ),
+                      Effect.orDie,
+                    )
                   if (committed) {
                     yield* Effect.forEach(
                       pubsub.durable.get(committed.aggregateID) ?? [],
