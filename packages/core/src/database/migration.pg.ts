@@ -1,3 +1,4 @@
+/// <reference path="./sql-text.d.ts" />
 export * as DatabasePgMigration from "./migration.pg"
 
 import { sql } from "drizzle-orm"
