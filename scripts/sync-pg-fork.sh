@@ -18,6 +18,14 @@
 #                     the pg branch; never opens MRs and never force-pushes over
 #                     unrelated history.
 #
+# Environment:
+#   OPENCODE_PG_BUN_VERSION  Bun to build/test with (default: package.json
+#                            packageManager). Provisioned into
+#                            ~/.cache/opencode-pg/bun/<ver>; the global bun is
+#                            never used, and the build is refused unless it
+#                            embeds exactly that runtime.
+#   OPENCODE_PG_KEEP_PREV    opencode-pg.prev-* rollback copies to keep (default 3).
+#
 # SAFETY (hard rules, mirrored from memory #129961 / #56754):
 #   * NEVER overwrites ~/.opencode/bin/opencode (the live binary). Only writes
 #     ~/.opencode/bin/opencode-pg.
@@ -63,6 +71,55 @@ done
 
 redact() { sed -E 's#(://[^:]+:)[^@]+#\1REDACTED#g'; }
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+
+# ---- pinned Bun -------------------------------------------------------------
+# `bun build --compile` embeds the Bun runtime that runs the build, so the
+# runtime inside opencode-pg is whatever `bun` happens to be on PATH. Bun.SQL's
+# connection-failure behaviour (idle-timeout, release/close of a dead reserved
+# connection) differs between Bun releases and PgRetry is verified against a
+# specific one -- e.g. 1.3.14 recovers, while a 1.4.2 repro hung releasing a
+# dead connection. So build and test with the version the repo pins in
+# `packageManager` (override: OPENCODE_PG_BUN_VERSION), provisioned into a
+# persistent cache rather than trusting the global bun.
+BUN_CACHE="${OPENCODE_PG_BUN_CACHE:-$HOME/.cache/opencode-pg/bun}"
+use_pinned_bun() {
+  local ver
+  ver="${OPENCODE_PG_BUN_VERSION:-$(sed -nE 's/.*"packageManager": *"bun@([0-9.]+)".*/\1/p' "$REPO/package.json" | head -1)}"
+  [[ -n "$ver" ]] || { echo "could not read bun version from package.json packageManager" >&2; exit 1; }
+  local dir="$BUN_CACHE/$ver"
+  if [[ ! -x "$dir/bun" ]] || [[ "$("$dir/bun" --version 2>/dev/null)" != "$ver" ]]; then
+    log "Provisioning pinned Bun ${ver} (regular x64) into ${dir}"
+    local tmp
+    tmp="$(mktemp -d)"
+    (cd "$tmp" && npm pack --silent "@oven/bun-linux-x64@${ver}" >/dev/null && tar xzf "oven-bun-linux-x64-${ver}.tgz")
+    mkdir -p "$dir"
+    install -m 0755 "$tmp/package/bin/bun" "$dir/bun"
+    rm -rf "$tmp"
+  fi
+  [[ "$("$dir/bun" --version)" == "$ver" ]] || { echo "pinned bun at $dir is not $ver" >&2; exit 1; }
+  export PATH="$dir:$PATH"
+  PINNED_BUN_VERSION="$ver"
+  echo "   bun: $(command -v bun) ($(bun --version)); global bun was ignored"
+}
+
+# Throwaway database helpers (soak + live patch tests). Never touch `opencode`.
+pg_admin() { docker exec opencode-pg psql -U opencode -d opencode -qc "$1" >/dev/null; }
+THROWAWAY_DBS=()
+drop_throwaway_dbs() {
+  local db
+  for db in "${THROWAWAY_DBS[@]}"; do pg_admin "DROP DATABASE IF EXISTS ${db};" 2>/dev/null || true; done
+}
+trap drop_throwaway_dbs EXIT
+create_throwaway_db() {
+  # $1 = db name. Creates it, registers it for drop-on-exit, and sets
+  # THROWAWAY_URL. Must NOT be called inside $(...): the registration has to
+  # happen in this shell, or the EXIT trap never sees it.
+  local base
+  base="$(set -a; . "$PG_ENV"; set +a; printf '%s' "${OPENCODE_DATABASE_URL%/*}")"
+  pg_admin "CREATE DATABASE $1 OWNER opencode;"
+  THROWAWAY_DBS+=("$1")
+  THROWAWAY_URL="$base/$1"
+}
 
 cd "$REPO"
 
@@ -222,15 +279,27 @@ EOF
   exit 1
 fi
 
+# Everything from here on (tests, schema generation, build) runs on the
+# pinned Bun. Read after the rebase so an upstream packageManager bump is
+# picked up.
+log "Pinning Bun to the repo's packageManager version"
+use_pinned_bun
+
 # Unit tests pin the normalizers' exact behaviour without needing a server.
+# pg-retry.test.ts additionally runs a LIVE idle-timeout recovery check on a
+# throwaway database: it is the gate that catches a Bun release whose Bun.SQL
+# connection-failure behaviour breaks PgRetry.
 if [[ "$SKIP_PATCH_TESTS" != "1" ]]; then
-  log "Running patch unit tests (core)"
+  log "Running patch unit tests (core, incl. live pg recovery on a throwaway db)"
+  create_throwaway_db "opencode_patchtest_$$"
+  PATCH_TEST_URL="$THROWAWAY_URL"
   pushd packages/core >/dev/null
-  bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts test/pg-retry.test.ts \
-    test/event-commit-unknown.test.ts || {
+  if ! env -u OPENCODE_DATABASE_URL OPENCODE_TEST_PG_URL="$PATCH_TEST_URL" \
+    bun test test/pg-json-param.test.ts test/session-runner-prefill.test.ts test/pg-retry.test.ts \
+    test/event-commit-unknown.test.ts 2>&1 | redact; then
     echo "core patch unit tests FAILED -- refusing to ship this build" >&2
     exit 1
-  }
+  fi
   popd >/dev/null
   log "Running patch unit tests (opencode: tool-argument salvage + v1 prefill guard)"
   pushd packages/opencode >/dev/null
@@ -272,6 +341,14 @@ else
 fi
 BUILT="dist/opencode-linux-x64/bin/opencode"
 [[ -x "$BUILT" ]] || { echo "build did not produce $BUILT" >&2; exit 1; }
+# The compiled binary must embed exactly the pinned runtime (regular x64, not
+# the "baseline" no-AVX2 variant, and not whatever global bun is installed).
+EMBEDDED_BUN="$(strings -n 8 "$BUILT" | grep -m1 -E '^Bun v[0-9]+\.[0-9]+\.[0-9]+ \(' || true)"
+if [[ "$EMBEDDED_BUN" != "Bun v${PINNED_BUN_VERSION} (Linux x64)" ]]; then
+  echo "built binary embeds '${EMBEDDED_BUN:-unknown}', expected 'Bun v${PINNED_BUN_VERSION} (Linux x64)' -- refusing to install" >&2
+  exit 1
+fi
+echo "   embedded runtime: ${EMBEDDED_BUN}"
 popd >/dev/null
 
 log "Installing to SEPARATE path ${PG_BIN} (live binary ${LIVE_BIN} untouched)"
@@ -291,6 +368,14 @@ chmod +x "$PG_BIN_STAGE"
 mv -f "$PG_BIN_STAGE" "$PG_BIN"
 echo "   opencode-pg version: $("$PG_BIN" --version)"
 echo "   live opencode version: $("$LIVE_BIN" --version 2>/dev/null || echo '(unreadable)')"
+# Each install leaves a ~185MB .prev-* rollback copy; keep only the newest
+# OPENCODE_PG_KEEP_PREV (default 3) so they don't fill the disk.
+KEEP_PREV="${OPENCODE_PG_KEEP_PREV:-3}"
+mapfile -t OLD_PREV < <(ls -1t "$PG_BIN".prev-* 2>/dev/null | tail -n +"$((KEEP_PREV + 1))")
+if [[ "${#OLD_PREV[@]}" -gt 0 ]]; then
+  rm -f -- "${OLD_PREV[@]}"
+  echo "   pruned ${#OLD_PREV[@]} old opencode-pg.prev-* backups (kept newest ${KEEP_PREV})"
+fi
 
 # ---- 5. verify ------------------------------------------------------------
 log "Verification"
@@ -313,9 +398,8 @@ echo "   [pg] existing session count = ${PG_N}"
 if [[ "$DO_SOAK" == "1" ]]; then
   log "Concurrency soak (20 writers) on a THROWAWAY db"
   SOAK_DB="opencode_soak_$$"
-  SOAK_URL="${OPENCODE_DATABASE_URL%/*}/${SOAK_DB}"
-  docker exec opencode-pg psql -U opencode -d opencode -c "CREATE DATABASE ${SOAK_DB} OWNER opencode;" >/dev/null
-  trap 'docker exec opencode-pg psql -U opencode -d opencode -c "DROP DATABASE IF EXISTS '"${SOAK_DB}"';" >/dev/null 2>&1 || true' EXIT
+  create_throwaway_db "$SOAK_DB"
+  SOAK_URL="$THROWAWAY_URL"
   tmp="$(mktemp -d)"
   fail=0
   for i in $(seq 1 20); do
