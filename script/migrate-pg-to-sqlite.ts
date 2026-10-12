@@ -132,6 +132,14 @@ function columnsOf(sqlite: Database, table: string): string[] {
   return rows.map((r) => r.name)
 }
 
+// The single-column primary key of a table, or undefined when the key is
+// composite or missing. Keyset pagination needs a unique, ordered column.
+function singlePrimaryKey(sqlite: Database, table: string): string | undefined {
+  const rows = sqlite.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>
+  const pk = rows.filter((r) => r.pk > 0)
+  return pk.length === 1 ? pk[0].name : undefined
+}
+
 // Serialize a pg jsonb value (already parsed into a JS value by Bun.SQL) back
 // to the exact compact JSON TEXT representation sqlite's text({mode:"json"})
 // columns expect (no NULs possible on the way out of pg since pg cannot store
@@ -250,13 +258,38 @@ async function migrateTable(sqlite: Database, table: string): Promise<{ copied: 
   const placeholders = cols.map(() => "?").join(", ")
   const insert = sqlite.prepare(`INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${placeholders})`)
 
+  // Keyset pagination on the single-column primary key: each page costs the
+  // same however deep it is. OFFSET paging re-scans every earlier row on each
+  // page, which made the hourly bridge export quadratic in the event table
+  // (5.5M rows, 30 to 60+ minutes per run). Tables without a single-column
+  // key keep OFFSET paging; they are small.
+  const pk = singlePrimaryKey(sqlite, table)
+  const baseWhere = whereOf(table)
   let offset = 0
+  let lastKey: unknown = undefined
   while (true) {
-    const batchRows = (await pg.unsafe(
-      `SELECT ${colList} FROM "${table}"${whereOf(table)} ORDER BY ${cols[0]} LIMIT ${READ_BATCH} OFFSET ${offset}`,
-    )) as Array<Record<string, unknown>>
+    let batchRows: Array<Record<string, unknown>>
+    if (pk) {
+      const keyCond = lastKey === undefined ? "" : `"${pk}" > $1`
+      const where = baseWhere
+        ? keyCond
+          ? ` WHERE (${baseWhere.slice(" WHERE ".length)}) AND ${keyCond}`
+          : baseWhere
+        : keyCond
+          ? ` WHERE ${keyCond}`
+          : ""
+      const sql = `SELECT ${colList} FROM "${table}"${where} ORDER BY "${pk}" LIMIT ${READ_BATCH}`
+      batchRows = (await (lastKey === undefined ? pg.unsafe(sql) : pg.unsafe(sql, [lastKey]))) as Array<
+        Record<string, unknown>
+      >
+      if (batchRows.length > 0) lastKey = batchRows[batchRows.length - 1][pk]
+    } else {
+      batchRows = (await pg.unsafe(
+        `SELECT ${colList} FROM "${table}"${baseWhere} ORDER BY ${cols[0]} LIMIT ${READ_BATCH} OFFSET ${offset}`,
+      )) as Array<Record<string, unknown>>
+      offset += READ_BATCH
+    }
     if (batchRows.length === 0) break
-    offset += READ_BATCH
 
     const idCol = cols.includes("id") ? "id" : cols[0]
     const insertMany = sqlite.transaction((rows: Array<Record<string, unknown>>) => {
