@@ -142,25 +142,38 @@ const make = (options: Config) =>
       ? Statement.defaultTransforms(options.transformResultNames).array
       : undefined
 
+    // Pool statements (outside a transaction) can hit the same idle-timer race
+    // as transactions: Bun closes a pooled connection after idleTimeout and a
+    // statement dispatched onto it at that moment fails with
+    // ERR_POSTGRES_IDLE_TIMEOUT without ever being sent. Re-send such a
+    // statement once; the pool hands out a fresh connection. Only for
+    // never-sent failures (PgRetry.neverSent), so it is safe for writes.
+    // Reserved (transaction) connections never retry here: the transaction
+    // itself is replayed by PgRetry.retryTransaction.
+    const send = <A>(retryNeverSent: boolean, attempt: () => Promise<A>): Promise<A> =>
+      retryNeverSent ? PgRetry.resendIfNeverSent(attempt) : attempt()
+
     const runOn =
-      (db: SQL) =>
+      (db: SQL, retryNeverSent = false) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
-          try: () => db.unsafe(query, params as any[]) as unknown as Promise<Array<Record<string, unknown>>>,
+          try: () =>
+            send(retryNeverSent, () => db.unsafe(query, params as any[]) as unknown as Promise<Array<Record<string, unknown>>>),
           catch: (cause) => classifyPgError(cause, query, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<Record<string, unknown>>))
 
     const runValuesOn =
-      (db: SQL) =>
+      (db: SQL, retryNeverSent = false) =>
       (query: string, params: ReadonlyArray<unknown> = []) =>
         Effect.tryPromise({
-          try: () => db.unsafe(query, params as any[]).values() as unknown as Promise<Array<unknown[]>>,
+          try: () =>
+            send(retryNeverSent, () => db.unsafe(query, params as any[]).values() as unknown as Promise<Array<unknown[]>>),
           catch: (cause) => classifyPgError(cause, query, executeErrorMessage(query, params, cause)),
         }).pipe(Effect.map((rows) => (rows ?? []) as Array<unknown[]>))
 
-    const connectionFor = (db: SQL): PgConnection => {
-      const run = runOn(db)
-      const runValues = runValuesOn(db)
+    const connectionFor = (db: SQL, retryNeverSent = false): PgConnection => {
+      const run = runOn(db, retryNeverSent)
+      const runValues = runValuesOn(db, retryNeverSent)
       return identity<PgConnection>({
         execute(query, params, transformRows) {
           return transformRows ? Effect.map(run(query, params), transformRows) : run(query, params)
@@ -182,7 +195,7 @@ const make = (options: Config) =>
 
     // Bun.sql manages its own connection pool, so the main acquirer does not
     // need the single-permit Semaphore that the sqlite driver uses.
-    const acquirer = Effect.succeed(connectionFor(native))
+    const acquirer = Effect.succeed(connectionFor(native, true))
 
     // A transaction must run all of its statements on a single dedicated
     // connection. Bun.sql exposes `.reserve()` to pull a connection out of the
