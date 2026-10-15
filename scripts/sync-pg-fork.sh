@@ -253,6 +253,8 @@ check_patch "pg bounded close (untimed close hangs after dead conn)" 1 \
   "packages/core/src/database/pg.bun.ts" 'native\.close\(\{ timeout'
 check_patch "durable event ambiguous-COMMIT reconcile" 1 \
   "packages/core/src/event.ts" 'PgRetry\.isCommitOutcomeUnknown\('
+check_patch "pool statements re-sent once when never sent" 1 \
+  "packages/core/src/database/pg.bun.ts" 'PgRetry\.resendIfNeverSent\('
 # A schema file that uses sqliteTable directly is invisible to the pg
 # generator, so its table silently goes missing from 0001_init (credential did).
 check_patch "credential table is dialect-aware" 1 \
