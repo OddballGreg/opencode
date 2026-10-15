@@ -6315,3 +6315,62 @@ describe("ProviderTransform.options - kimi family adaptive thinking", () => {
     expect(result.thinking).toBeUndefined()
   })
 })
+
+describe("ProviderTransform.message - cache control never lands on reasoning parts", () => {
+  const model = {
+    id: "duo-chat-opus",
+    providerID: "gitlab",
+    api: { id: "claude-opus-4", url: "https://gitlab.com", npm: "gitlab-ai-provider" },
+    name: "Duo Chat Opus",
+    capabilities: {
+      temperature: true,
+      reasoning: true,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: true },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0.001, output: 0.002, cache: { read: 0.0001, write: 0.0002 } },
+    limit: { context: 200_000, output: 8192 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  test("puts the breakpoint on the last non-reasoning part", () => {
+    const msgs = [
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Answer" },
+          { type: "reasoning", text: "Thinking" },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, model, {}) as any[]
+    const assistant = result.find((msg) => msg.role === "assistant")
+    const reasoning = assistant.content.find((part: any) => part.type === "reasoning")
+    const text = assistant.content.find((part: any) => part.type === "text")
+
+    expect(reasoning?.providerOptions?.anthropic?.cacheControl).toBeUndefined()
+    expect(text.providerOptions.anthropic.cacheControl).toEqual({ type: "ephemeral" })
+  })
+
+  test("skips a message that only has reasoning", () => {
+    const msgs = [
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
+      { role: "assistant", content: [{ type: "reasoning", text: "Thinking" }] },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, model, {}) as any[]
+    const assistant = result.find((msg) => msg.role === "assistant")
+
+    if (assistant) {
+      expect(assistant.providerOptions?.anthropic?.cacheControl).toBeUndefined()
+      for (const part of assistant.content) expect(part.providerOptions?.anthropic?.cacheControl).toBeUndefined()
+    }
+  })
+})

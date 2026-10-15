@@ -387,17 +387,21 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
       model.api.npm === "@ai-sdk/amazon-bedrock"
     const shouldUseContentOptions = !useMessageLevelOptions && Array.isArray(msg.content) && msg.content.length > 0
 
-    if (shouldUseContentOptions) {
-      const lastContent = msg.content[msg.content.length - 1]
-      if (
-        lastContent &&
-        typeof lastContent === "object" &&
-        lastContent.type !== "tool-approval-request" &&
-        lastContent.type !== "tool-approval-response"
-      ) {
+    if (shouldUseContentOptions && Array.isArray(msg.content)) {
+      const content: Array<{ type: string; providerOptions?: Record<string, any> }> = msg.content
+      const lastContent = content.findLast(
+        (part) =>
+          part &&
+          typeof part === "object" &&
+          part.type !== "reasoning" &&
+          part.type !== "tool-approval-request" &&
+          part.type !== "tool-approval-response",
+      )
+      if (lastContent) {
         lastContent.providerOptions = mergeDeep(lastContent.providerOptions ?? {}, providerOptions)
         continue
       }
+      if (content.some((part) => part && typeof part === "object" && part.type === "reasoning")) continue
     }
 
     msg.providerOptions = mergeDeep(msg.providerOptions ?? {}, providerOptions)
