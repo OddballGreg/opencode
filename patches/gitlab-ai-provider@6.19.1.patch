@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index e99b700..aad7ce0 100644
+index e99b700..858996a 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -994,6 +994,9 @@ ${message.content}` : message.content;
@@ -12,7 +12,14 @@ index e99b700..aad7ce0 100644
          if (content.length > 0) {
            messages.push({ role: "assistant", content });
          }
-@@ -1041,10 +1044,14 @@ ${message.content}` : message.content;
+@@ -1037,14 +1040,21 @@ ${message.content}` : message.content;
+         cache_control: { type: "ephemeral" }
+       }
+     ] : void 0;
++    if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
++      messages.push({ role: "user", content: [{ type: "text", text: "Continue." }] });
++    }
+     const breakpointCount = Math.min(2, messages.length);
      for (let i = messages.length - breakpointCount; i < messages.length; i++) {
        const message = messages[i];
        if (Array.isArray(message.content) && message.content.length > 0) {
@@ -32,7 +39,7 @@ index e99b700..aad7ce0 100644
      }
      return { system, messages };
 diff --git a/dist/index.mjs b/dist/index.mjs
-index efcba0c..57f6df7 100644
+index efcba0c..06f4acd 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -915,6 +915,9 @@ ${message.content}` : message.content;
@@ -45,7 +52,14 @@ index efcba0c..57f6df7 100644
          if (content.length > 0) {
            messages.push({ role: "assistant", content });
          }
-@@ -962,10 +965,14 @@ ${message.content}` : message.content;
+@@ -958,14 +961,21 @@ ${message.content}` : message.content;
+         cache_control: { type: "ephemeral" }
+       }
+     ] : void 0;
++    if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
++      messages.push({ role: "user", content: [{ type: "text", text: "Continue." }] });
++    }
+     const breakpointCount = Math.min(2, messages.length);
      for (let i = messages.length - breakpointCount; i < messages.length; i++) {
        const message = messages[i];
        if (Array.isArray(message.content) && message.content.length > 0) {
