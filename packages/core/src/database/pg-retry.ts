@@ -73,6 +73,27 @@ const field = (cause: unknown, key: string): string | undefined => {
 
 const isCommit = (query: string) => /^\s*(commit|end)\b/i.test(query)
 
+/**
+ * True only when the failure proves the statement never reached the server:
+ * Bun's idle timer (it only fires while no request is in flight), a connect
+ * timeout, or a handle that was already dead. Re-sending such a statement on a
+ * fresh connection is safe even for writes, because it never ran.
+ */
+export const neverSent = (cause: unknown): boolean => {
+  const code = field(cause, "code")
+  const message = field(cause, "message") ?? ""
+  return (code !== undefined && IDLE_CODES.has(code)) || NOT_SENT_MESSAGES.some((m) => message.includes(m))
+}
+
+/**
+ * Run a single statement; if it fails in a way that proves it was never sent
+ * (see neverSent), send it once more. Used for pool statements outside a
+ * transaction, where a pooled connection can idle out just as a statement is
+ * dispatched onto it. Exactly one extra attempt, never for any other failure.
+ */
+export const resendIfNeverSent = <A>(attempt: () => Promise<A>): Promise<A> =>
+  attempt().catch((cause) => (neverSent(cause) ? attempt() : Promise.reject(cause)))
+
 export type Kind = "connection" | "serialization" | "deadlock" | "commit-unknown" | "fatal"
 
 /** Classify a raw Bun.SQL failure for the statement `query`. */
