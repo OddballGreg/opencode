@@ -1,0 +1,22 @@
+[Unit]
+Description=Shared opencode server (one backend for all attached TUIs / runs)
+Documentation=file:/home/gregory/gitlab_projects/coordinator/scripts/oc-mem.py
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+# Launch through an interactive zsh so the server gets exactly the environment
+# a herdr pane gets (keyring secrets, mise PATH, opencode env files), and
+# through the shim so it gets the pg env + OPENCODE_PG_BIN selector. Every
+# attached session's shell commands run with this environment.
+ExecStart=/usr/bin/zsh -i -c 'exec %h/.opencode/bin/opencode serve --port 4096 --hostname 127.0.0.1'
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+# Never let the herdr pane identity leak into the server (its herdr plugin
+# skips `serve` anyway; the TUI plugin in each attached client reports per pane).
+UnsetEnvironment=HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_AGENT
+
+[Install]
+WantedBy=default.target

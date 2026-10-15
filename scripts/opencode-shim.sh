@@ -23,6 +23,9 @@
 #       (name beside this shim, or absolute path). Put it in
 #       ~/.config/opencode-pg/env to switch every launch, including bg workers;
 #       delete the line to roll back. A missing target falls back to opencode-pg.
+#   OPENCODE_SHARED=1 opencode [-s ID|-c] [dir] -> attach to the shared server
+#       (opencode-shared.service, OPENCODE_SHARED_URL, default
+#       http://127.0.0.1:4096) instead of a private backend; see below.
 #
 # Default flipped stock->postgres 2026-08-14 after the cutover + fixes proved
 # stable (event-write FOR UPDATE lock landed; 1-month health review reminder set).
@@ -133,6 +136,52 @@ if [ "${HERDR_ENV:-}" = "1" ]; then
       export HERDR_AGENT=opencode
       ;;
   esac
+fi
+
+# Shared server (opt-in: OPENCODE_SHARED=1, e.g. in $PG_ENV). A plain TUI launch
+# attaches to one long-lived `opencode serve` (opencode-shared.service on
+# $OPENCODE_SHARED_URL) instead of starting a full backend per pane: ~184 MB per
+# attached client instead of ~924 MB, and MCP servers are started once per
+# directory on the server rather than once per pane (measured 2026-10-15).
+# Only translated when EVERY argument is one `attach` understands; any other
+# flag (--model, --prompt, --agent, --auto, server flags) or subcommand runs
+# standalone exactly as before. If the server is not healthy, start standalone.
+if [ "$backend" = "postgres" ] && [ "${OPENCODE_SHARED:-}" = "1" ]; then
+  shared_url="${OPENCODE_SHARED_URL:-http://127.0.0.1:4096}"
+  shared_ok=1
+  shared_dir=""
+  expect_value=""
+  for a in "$@"; do
+    if [ -n "$expect_value" ]; then expect_value=""; continue; fi
+    case "$a" in
+      --print-logs|--pure|-c|--continue|--fork|--mini|--no-replay) ;;
+      --log-level|-s|--session|--replay-limit) expect_value=1 ;;
+      --log-level=*|--session=*|--replay-limit=*) ;;
+      -*) shared_ok=0; break ;;
+      *)
+        if [ -z "$shared_dir" ] && [ -d "$a" ]; then shared_dir="$a"; else shared_ok=0; break; fi
+        ;;
+    esac
+  done
+  [ -n "$expect_value" ] && shared_ok=0
+  if [ "$shared_ok" = "1" ]; then
+    if curl -sf -m 2 "$shared_url/global/health" >/dev/null 2>&1; then
+      if [ -n "$shared_dir" ]; then
+        # Drop the positional project dir; it becomes --dir.
+        n=$#
+        removed=0
+        while [ "$n" -gt 0 ]; do
+          a="$1"; shift; n=$((n - 1))
+          if [ "$removed" = "0" ] && [ "$a" = "$shared_dir" ]; then removed=1; else set -- "$@" "$a"; fi
+        done
+        shared_dir="$(cd "$shared_dir" && pwd)"
+      else
+        shared_dir="$PWD"
+      fi
+      exec "$TARGET" attach "$shared_url" --dir "$shared_dir" "$@"
+    fi
+    echo "opencode(shim): shared server $shared_url is not healthy; starting standalone." >&2
+  fi
 fi
 
 exec "$TARGET" "$@"
