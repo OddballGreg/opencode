@@ -10,6 +10,57 @@ const pgError = (code: string, message: string, errno?: string) =>
 const idle = () => pgError("ERR_POSTGRES_IDLE_TIMEOUT", "Idle timeout reached after 20s")
 const closed = () => pgError("ERR_POSTGRES_CONNECTION_CLOSED", "Connection closed")
 
+describe("PgRetry.neverSent", () => {
+  test("only failures that prove the statement never reached the server", () => {
+    expect(PgRetry.neverSent(idle())).toBe(true)
+    expect(PgRetry.neverSent(new Error("connection must be a PostgresSQLConnection"))).toBe(true)
+    expect(PgRetry.neverSent(pgError("ERR_POSTGRES_CONNECTION_TIMEOUT", "Connection timeout"))).toBe(true)
+    // In-flight loss or server-side errors: the statement may have run.
+    expect(PgRetry.neverSent(closed())).toBe(false)
+    expect(PgRetry.neverSent(pgError("ERR_POSTGRES_SERVER_ERROR", "deadlock", "40P01"))).toBe(false)
+    expect(PgRetry.neverSent(pgError("ERR_POSTGRES_SERVER_ERROR", "duplicate key", "23505"))).toBe(false)
+    expect(PgRetry.neverSent(new Error("boom"))).toBe(false)
+  })
+})
+
+describe("PgRetry.resendIfNeverSent (pool statements)", () => {
+  const scripted = (...outcomes: unknown[]) => {
+    let calls = 0
+    const attempt = () => {
+      const o = outcomes[calls++]
+      return o instanceof Error ? Promise.reject(o) : Promise.resolve(o)
+    }
+    return { attempt, calls: () => calls }
+  }
+
+  test("re-sends once when the pooled connection idled out under the statement", async () => {
+    const s = scripted(idle(), "rows")
+    expect(await PgRetry.resendIfNeverSent(s.attempt)).toBe("rows")
+    expect(s.calls()).toBe(2)
+  })
+
+  test("never re-sends when the statement may have run", async () => {
+    for (const err of [closed(), pgError("ERR_POSTGRES_SERVER_ERROR", "duplicate key", "23505")]) {
+      const s = scripted(err, "rows")
+      await expect(PgRetry.resendIfNeverSent(s.attempt)).rejects.toBe(err)
+      expect(s.calls()).toBe(1)
+    }
+  })
+
+  test("re-sends at most once", async () => {
+    const second = idle()
+    const s = scripted(idle(), second, "rows")
+    await expect(PgRetry.resendIfNeverSent(s.attempt)).rejects.toBe(second)
+    expect(s.calls()).toBe(2)
+  })
+
+  test("success needs no second attempt", async () => {
+    const s = scripted("rows")
+    expect(await PgRetry.resendIfNeverSent(s.attempt)).toBe("rows")
+    expect(s.calls()).toBe(1)
+  })
+})
+
 describe("PgRetry.classify", () => {
   test("idle timeout is retryable even on COMMIT (Bun only fires it with no request in flight)", () => {
     expect(PgRetry.classify(idle(), "COMMIT")).toBe("connection")
