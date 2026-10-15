@@ -1,0 +1,46 @@
+diff --git a/dist/index.js b/dist/index.js
+index e99b700..37e3c74 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1041,10 +1041,14 @@ ${message.content}` : message.content;
+     for (let i = messages.length - breakpointCount; i < messages.length; i++) {
+       const message = messages[i];
+       if (Array.isArray(message.content) && message.content.length > 0) {
+-        const lastBlock = message.content[message.content.length - 1];
+-        lastBlock.cache_control = {
+-          type: "ephemeral"
+-        };
++        const lastBlock = message.content.findLast(
++          (block) => block.type !== "thinking" && block.type !== "redacted_thinking"
++        );
++        if (lastBlock) {
++          lastBlock.cache_control = {
++            type: "ephemeral"
++          };
++        }
+       }
+     }
+     return { system, messages };
+diff --git a/dist/index.mjs b/dist/index.mjs
+index efcba0c..006d085 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -962,10 +962,14 @@ ${message.content}` : message.content;
+     for (let i = messages.length - breakpointCount; i < messages.length; i++) {
+       const message = messages[i];
+       if (Array.isArray(message.content) && message.content.length > 0) {
+-        const lastBlock = message.content[message.content.length - 1];
+-        lastBlock.cache_control = {
+-          type: "ephemeral"
+-        };
++        const lastBlock = message.content.findLast(
++          (block) => block.type !== "thinking" && block.type !== "redacted_thinking"
++        );
++        if (lastBlock) {
++          lastBlock.cache_control = {
++            type: "ephemeral"
++          };
++        }
+       }
+     }
+     return { system, messages };
