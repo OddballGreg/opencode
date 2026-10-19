@@ -1,6 +1,6 @@
 [Unit]
 Description=Shared opencode server (one backend for all attached TUIs / runs)
-Documentation=file:/home/gregory/gitlab_projects/coordinator/scripts/oc-mem.py
+Documentation=https://github.com/OddballGreg/opencode
 After=default.target
 
 [Service]
