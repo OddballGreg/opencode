@@ -26,7 +26,7 @@
 #                            embeds exactly that runtime.
 #   OPENCODE_PG_KEEP_PREV    opencode-pg.prev-* rollback copies to keep (default 3).
 #
-# SAFETY (hard rules, mirrored from memory #129961 / #56754):
+# SAFETY (hard rules):
 #   * NEVER overwrites ~/.opencode/bin/opencode (the live binary). Only writes
 #     ~/.opencode/bin/opencode-pg.
 #   * NEVER runs destructive migrations against the real `opencode` pg database.
@@ -436,7 +436,7 @@ fi
 log "DONE. opencode-pg @ v${UP_VER} built and verified side-by-side."
 cat <<EOF
 
-Next steps (manual, only when Gregory approves promotion to daily driver):
+Next steps (manual, only when the maintainer approves promotion to daily driver):
   1. Back up the current live binary:
        cp "$LIVE_BIN" "$LIVE_BIN.sqlite-backup-\$(date +%Y%m%d)"
   2. Promote:

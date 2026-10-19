@@ -1,10 +1,14 @@
 #!/usr/bin/env bun
+import { homedir } from "os"
 import { Database } from "bun:sqlite"
 import { SQL } from "bun"
 
-const SQLITE_PATH = "/home/gregory/.local/share/opencode/opencode.db"
-const PG_URL =
-  process.env.OPENCODE_DATABASE_URL ?? "postgres://opencode:opencode_dev_pw@127.0.0.1:55432/opencode"
+const SQLITE_PATH = `${homedir()}/.local/share/opencode/opencode.db`
+const PG_URL = process.env.OPENCODE_DATABASE_URL
+if (!PG_URL) {
+  console.error("FATAL: OPENCODE_DATABASE_URL is not set. Export it with the Postgres connection URL first.")
+  process.exit(2)
+}
 
 const TRUNCATE = process.argv.includes("--truncate")
 // read batch size: how many rows to pull from sqlite per loop
