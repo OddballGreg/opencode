@@ -3,7 +3,7 @@
 # "assistant message prefill" 400 after reopening (i.e. the binary's built-in
 # failInterruptedTools self-heal did not resolve it).
 #
-# Per investigation (memory #148355), the correct event-sourced fix is to append a
+# Per investigation, the correct event-sourced fix is to append a
 # RevertEvent.Committed targeting the last GOOD user message, which opencode's projector
 # (packages/core/src/session/projector.ts:415-454) applies transactionally:
 # deletes session_message rows with seq > boundary, cleans session_input, resets the
@@ -25,7 +25,7 @@ set -euo pipefail
 SES="${1:-}"
 [ -n "$SES" ] || { echo "usage: repair-session.sh <sessionID>" >&2; exit 2; }
 cat >&2 <<EOF
-repair-session.sh is a documented stub (see header + memory #148355).
+repair-session.sh is a documented stub (see header).
 Session requested: $SES
 
 Recommended order:

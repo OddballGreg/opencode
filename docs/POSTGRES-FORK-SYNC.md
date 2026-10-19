@@ -14,8 +14,6 @@ step with upstream and deploying it **side-by-side** with the stock binary.
 > low-level sync/deploy detail it references.
 > Memory-module integration + power-use caveat:
 > `opencode-memory` repo → `docs/postgres-backend-integration.md`.
->
-> Memory refs: `#129961` (plan), `#56754` (original cutover). Keep both current.
 
 ---
 
@@ -196,7 +194,7 @@ Keep autoupdate disabled so it can't overwrite the promoted fork binary.
   `schema.gen.ts` / `migration.gen.ts` and adds `v1-migration.*`.
   **Therefore:** moving the fork to v2 is a *port*, not a sync — do **not** run
   `sync-pg-fork.sh --upstream v2.0.x` expecting it to succeed, and do not burn a
-  maintenance cycle re-probing it. It needs an explicit decision from Gregory
+  maintenance cycle re-probing it. It needs an explicit decision from the maintainer
   (stay on the v1.18 maintenance line vs. fund a v2 port of the dialect-aware
   schema onto v2's generated-schema layout). Until then the fork stays on the
   latest `feat/postgres-backend-v1.18.x` branch and this is the standing gap.
