@@ -2,7 +2,11 @@ import * as Effect from "effect/Effect"
 import * as Client from "effect/unstable/sql/SqlClient"
 import { layer as pgLayer } from "./pg.bun"
 
-const URL = "postgres://opencode:opencode_dev_pw@127.0.0.1:55432/opencode"
+const URL = process.env.OPENCODE_DATABASE_URL
+if (!URL) {
+  console.error("FATAL: OPENCODE_DATABASE_URL is not set. Export it with the Postgres connection URL first.")
+  process.exit(2)
+}
 
 const program = Effect.gen(function* () {
   const sql = yield* Client.SqlClient

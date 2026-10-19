@@ -1,7 +1,7 @@
 # opencode Postgres backend — operating & maintenance README
 
 This fork adds an optional **Postgres storage backend** to opencode. It is the
-daily driver on Gregory's setup (default flipped stock→pg on 2026-08-14). This
+daily driver on the maintainer's setup (default flipped stock→pg on 2026-08-14). This
 README is the map: what the pieces are, how the backend is kept alive and in
 sync with canonical (upstream) opencode, and how to operate/roll back.
 

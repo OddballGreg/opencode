@@ -4,7 +4,7 @@ Documentation=https://github.com/OddballGreg/opencode
 
 [Service]
 Type=oneshot
-ExecStart=/home/gregory/.local/bin/opencode-shim-guard.sh
+ExecStart=%h/.local/bin/opencode-shim-guard.sh
 StandardOutput=journal
 StandardError=journal
 
