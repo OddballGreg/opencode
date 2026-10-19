@@ -37,4 +37,4 @@ done
 
 echo
 echo "# If a reopened session still errors with the prefill 400, it did not self-heal;"
-echo "# run the RevertEvent fallback (script/pg-cutover/repair-session.sh <id>) - see memory #148355."
+echo "# run the RevertEvent fallback (script/pg-cutover/repair-session.sh <id>) - see its header."

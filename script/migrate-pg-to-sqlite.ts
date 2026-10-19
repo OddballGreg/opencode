@@ -1,11 +1,15 @@
 #!/usr/bin/env bun
+import { homedir } from "os"
 import { Database } from "bun:sqlite"
 
 const SQLITE_OUT = process.env.SQLITE_OUT ?? process.argv.find((a, i) => i > 1 && !a.startsWith("--")) ?? "/tmp/opencode-from-pg.db"
-const PG_URL =
-  process.env.OPENCODE_DATABASE_URL ?? "postgres://opencode:opencode_dev_pw@127.0.0.1:55432/opencode"
+const PG_URL = process.env.OPENCODE_DATABASE_URL
+if (!PG_URL) {
+  console.error("FATAL: OPENCODE_DATABASE_URL is not set. Export it with the Postgres connection URL first.")
+  process.exit(2)
+}
 
-const LIVE_SQLITE_PATH = "/home/gregory/.local/share/opencode/opencode.db"
+const LIVE_SQLITE_PATH = `${homedir()}/.local/share/opencode/opencode.db`
 if (SQLITE_OUT === LIVE_SQLITE_PATH) {
   console.error(`FATAL: refusing to write to the live SQLite database (${LIVE_SQLITE_PATH}).`)
   console.error(`Set SQLITE_OUT to a throwaway path instead.`)
