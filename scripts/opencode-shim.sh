@@ -121,9 +121,14 @@ fi
 # (run/serve/web) launched from inside a herdr pane must NOT inherit the pane
 # identity, or their herdr plugin reports would overwrite the pane's state.
 if [ "${HERDR_ENV:-}" = "1" ]; then
+  # The subcommand is the first word that is neither a flag nor the value of
+  # a flag that takes one (so `-m provider/model run` is still `run`).
   sub=""
+  value_next=""
   for a in "$@"; do
+    if [ -n "$value_next" ]; then value_next=""; continue; fi
     case "$a" in
+      -m|--model|-s|--session|--agent|--prompt|--log-level|--port|--hostname|--mdns-domain|--cors|--replay-limit) value_next=1 ;;
       -*) continue ;;
       *) sub="$a"; break ;;
     esac
