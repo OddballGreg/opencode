@@ -135,13 +135,24 @@ if [ "${HERDR_ENV:-}" = "1" ]; then
     *)
       export HERDR_AGENT=opencode
       # Boot/restore storm gate: when herdr restores every pane at once (after
-      # boot, or a herdr server restart), wait for a health-gated turn so the
-      # panes start a few at a time instead of all together (2026-10-22: 47
-      # panes in one minute, load1 307). Returns at once outside a storm or on
-      # a calm box; Enter in the pane skips the wait; a broken gate admits.
+      # boot, resume, or a herdr server restart), wait for a health-gated turn
+      # so the panes start a few at a time (2026-10-22: 47 panes in one minute,
+      # load1 307). Returns at once outside a storm or on a calm box. Enter or
+      # Ctrl-C in the pane skips the wait (the INT trap keeps this shell alive
+      # so opencode still starts). A broken gate admits. Only TUI launches are
+      # gated, never --version/--help or one-shot subcommands.
       settle="$HOME/.local/bin/boot-settle"
-      if [ -x "$settle" ] && [ "${OPENCODE_NO_SETTLE:-}" != "1" ]; then
+      gate=1
+      case "$sub" in
+        mcp|auth|models|stats|export|import|upgrade|uninstall|agent|github|pr|debug|acp|completion|generate) gate=0 ;;
+      esac
+      for a in "$@"; do
+        case "$a" in --version|-v|--help|-h) gate=0 ;; esac
+      done
+      if [ "$gate" = "1" ] && [ -x "$settle" ] && [ "${OPENCODE_NO_SETTLE:-}" != "1" ]; then
+        trap : INT
         "$settle" acquire --class tui --only-if-storm --name "herdr-pane-${HERDR_PANE_ID:-?}" || true
+        trap - INT
       fi
       ;;
   esac
