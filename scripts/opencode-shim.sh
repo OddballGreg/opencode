@@ -144,7 +144,7 @@ if [ "${HERDR_ENV:-}" = "1" ]; then
       settle="$HOME/.local/bin/boot-settle"
       gate=1
       case "$sub" in
-        mcp|auth|models|stats|export|import|upgrade|uninstall|agent|github|pr|debug|acp|completion|generate) gate=0 ;;
+        mcp|auth|models|providers|stats|export|import|upgrade|uninstall|agent|github|pr|debug|acp|completion|generate|session|db|plugin|plug|console) gate=0 ;;
       esac
       for a in "$@"; do
         case "$a" in --version|-v|--help|-h) gate=0 ;; esac
