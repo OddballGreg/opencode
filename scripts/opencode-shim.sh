@@ -134,6 +134,15 @@ if [ "${HERDR_ENV:-}" = "1" ]; then
       ;;
     *)
       export HERDR_AGENT=opencode
+      # Boot/restore storm gate: when herdr restores every pane at once (after
+      # boot, or a herdr server restart), wait for a health-gated turn so the
+      # panes start a few at a time instead of all together (2026-10-22: 47
+      # panes in one minute, load1 307). Returns at once outside a storm or on
+      # a calm box; Enter in the pane skips the wait; a broken gate admits.
+      settle="$HOME/.local/bin/boot-settle"
+      if [ -x "$settle" ] && [ "${OPENCODE_NO_SETTLE:-}" != "1" ]; then
+        "$settle" acquire --class tui --only-if-storm --name "herdr-pane-${HERDR_PANE_ID:-?}" || true
+      fi
       ;;
   esac
 fi
