@@ -948,6 +948,69 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "does not persist tail_start_id when the summary request fails",
+    () => {
+      const stub = llm()
+      stub.push(
+        Stream.fromAsyncIterable(
+          {
+            async *[Symbol.asyncIterator]() {
+              yield LLMEvent.stepStart({ index: 0 })
+              throw new APICallError({
+                message: "invalid_request_error: field foo is not valid",
+                url: "https://example.com/v1/chat/completions",
+                requestBodyValues: {},
+                statusCode: 400,
+                responseHeaders: {},
+                responseBody: '{"error":{"type":"invalid_request_error"}}',
+                isRetryable: false,
+              })
+            },
+          },
+          (err) => err,
+        ),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const first = yield* createUserMessage(session.id, "first")
+        yield* createUserMessage(session.id, "second")
+        yield* createUserMessage(session.id, "third")
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        const all = yield* ssn.messages({ sessionID: session.id })
+        const summary = all.at(-1)
+        expect(result).toBe("stop")
+        expect(summary?.info.role).toBe("assistant")
+        if (summary?.info.role === "assistant") {
+          expect(summary.info.summary).toBe(true)
+          expect(summary.info.error).toBeDefined()
+          expect(summary.info.finish).toBeUndefined()
+        }
+
+        const part = yield* readCompactionPart(session.id)
+        expect(part?.type).toBe("compaction")
+        expect(part?.tail_start_id).toBeUndefined()
+
+        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        expect(filtered[0]?.info.id).toBe(first.id)
+        expect(filtered.map((msg) => msg.info.id)).toEqual(all.map((msg) => msg.info.id))
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "shrinks retained tail to fit preserve token budget",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
