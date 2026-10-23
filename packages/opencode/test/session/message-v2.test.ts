@@ -1917,3 +1917,95 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
   })
 })
+
+describe("session.message-v2.filterCompacted", () => {
+  const failed = new SessionV1.APIError({
+    message: "invalid_request_error: field foo is not valid",
+    isRetryable: false,
+    statusCode: 400,
+  }).toObject() as SessionV1.APIError
+
+  function user(id: string, text: string): SessionV1.WithParts {
+    return {
+      info: userInfo(id),
+      parts: [{ ...basePart(id, `${id}_text`), type: "text", text }] as SessionV1.Part[],
+    }
+  }
+
+  function reply(id: string, parentID: string): SessionV1.WithParts {
+    return {
+      info: { ...assistantInfo(id, parentID), finish: "stop" } as SessionV1.Assistant,
+      parts: [{ ...basePart(id, `${id}_text`), type: "text", text: "reply" }] as SessionV1.Part[],
+    }
+  }
+
+  function compaction(id: string, tail: string): SessionV1.WithParts {
+    return {
+      info: userInfo(id),
+      parts: [
+        { ...basePart(id, `${id}_compaction`), type: "compaction", auto: false, tail_start_id: tail },
+      ] as SessionV1.Part[],
+    }
+  }
+
+  function summary(id: string, parentID: string, ok: boolean): SessionV1.WithParts {
+    return {
+      info: ok
+        ? ({ ...assistantInfo(id, parentID), summary: true, finish: "stop" } as SessionV1.Assistant)
+        : ({ ...assistantInfo(id, parentID, failed), summary: true } as SessionV1.Assistant),
+      parts: ok ? ([{ ...basePart(id, `${id}_text`), type: "text", text: "summary" }] as SessionV1.Part[]) : [],
+    }
+  }
+
+  const ids = (msgs: SessionV1.WithParts[]) => msgs.map((msg): string => msg.info.id)
+
+  test("keeps the full history when the summary for a compaction with tail_start_id failed", () => {
+    const history = [
+      user("msg_001", "the secret word is PELICAN"),
+      reply("msg_002", "msg_001"),
+      user("msg_003", "keep it short"),
+      reply("msg_004", "msg_003"),
+      compaction("msg_005", "msg_003"),
+      summary("msg_006", "msg_005", false),
+      user("msg_007", "what is the secret word?"),
+    ]
+
+    const filtered = MessageV2.filterCompacted([...history].reverse())
+
+    expect(ids(filtered)).toEqual(ids(history))
+  })
+
+  test("reorders around the newest successful compaction when a newer compaction failed", () => {
+    const history = [
+      user("msg_001", "first"),
+      reply("msg_002", "msg_001"),
+      user("msg_003", "second"),
+      reply("msg_004", "msg_003"),
+      compaction("msg_005", "msg_003"),
+      summary("msg_006", "msg_005", true),
+      user("msg_007", "third"),
+      reply("msg_008", "msg_007"),
+      user("msg_009", "fourth"),
+      reply("msg_010", "msg_009"),
+      compaction("msg_011", "msg_009"),
+      summary("msg_012", "msg_011", false),
+      user("msg_013", "fifth"),
+    ]
+
+    const filtered = MessageV2.filterCompacted([...history].reverse())
+
+    expect(ids(filtered)).toEqual([
+      "msg_005",
+      "msg_006",
+      "msg_003",
+      "msg_004",
+      "msg_007",
+      "msg_008",
+      "msg_009",
+      "msg_010",
+      "msg_011",
+      "msg_012",
+      "msg_013",
+    ])
+  })
+})
